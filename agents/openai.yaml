@@ -1,0 +1,4 @@
+interface:
+  display_name: "Track Research History"
+  short_description: "Repo history, rationale, ideas, and recall"
+  default_prompt: "Use $track-research-history to recall relevant project history, then record code rationale and decisions as you work."

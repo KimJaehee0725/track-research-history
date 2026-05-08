@@ -88,6 +88,92 @@ class CollabBehaviorSmokeTests(unittest.TestCase):
         root = Path(tmp.name)
         return root, HistoryCLI(root)
 
+    def test_change_records_include_obsidian_frontmatter_and_pass_lint(self) -> None:
+        _, cli = self.with_cli()
+        cli.run("bootstrap")
+
+        record = cli.emitted_path(
+            cli.run(
+                "change",
+                "--title",
+                "Obsidian frontmatter smoke",
+                "--why",
+                "Need graph-friendly history records.",
+                "--how",
+                "Add YAML frontmatter while keeping body metadata.",
+                "--no-git-status",
+            )
+        )
+        text = record.read_text(encoding="utf-8")
+
+        self.assertTrue(text.startswith("---\n"))
+        self.assertIn("type: change\n", text)
+        self.assertIn('title: "Obsidian frontmatter smoke"\n', text)
+        self.assertIn("tags: [history, change]\n", text)
+        self.assertIn("# Change - Obsidian frontmatter smoke", text)
+        self.assertIn("Date:", text)
+
+        lint = cli.run("lint", "--strict").stdout
+        self.assertIn("Summary: errors=0 warnings=0", lint)
+
+    def test_lint_reports_broken_wikilink_as_error(self) -> None:
+        root, cli = self.with_cli()
+        cli.run("bootstrap")
+        broken = root / "history" / "changes" / "broken-link.md"
+        broken.write_text(
+            "\n".join(
+                [
+                    "---",
+                    "type: change",
+                    'title: "Broken link"',
+                    "date: 2026-05-09",
+                    "tags: [history, change]",
+                    "---",
+                    "# Broken Link",
+                    "",
+                    "This points at [[Missing History Note]].",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        proc = cli.run("lint", check=False)
+
+        self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("broken wikilink [[Missing History Note]]", proc.stdout)
+
+    def test_promote_updates_inbox_frontmatter_status(self) -> None:
+        _, cli = self.with_cli()
+        cli.run("collab", "bootstrap", "--task", "task-alpha", "--workstream", "eval")
+        inbox = cli.submit_summary(
+            title="Promote frontmatter smoke",
+            summary="Promotion should keep YAML metadata synchronized.",
+        )
+
+        before = inbox.read_text(encoding="utf-8")
+        self.assertTrue(before.startswith("---\n"))
+        self.assertIn("approval_status: submitted\n", before)
+
+        cli.run(
+            "collab",
+            "promote",
+            "--inbox",
+            str(inbox),
+            "--target",
+            "workstream",
+            "--maintainer",
+            "maintainer",
+            "--note",
+            "Accepted frontmatter smoke note.",
+        )
+        after = inbox.read_text(encoding="utf-8")
+
+        self.assertIn("approval_status: accepted\n", after)
+        self.assertIn("promoted_to: history/tasks/task-alpha/workstreams/eval.md\n", after)
+        self.assertIn("archived: false\n", after)
+        self.assertIn("Approval Status: accepted", after)
+
     def test_existing_smoke_flow_and_inbox_recall_boundary(self) -> None:
         root, cli = self.with_cli()
         cli.run("collab", "bootstrap", "--task", "task-alpha", "--workstream", "eval")

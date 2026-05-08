@@ -69,6 +69,21 @@ python3 <skill-dir>/scripts/history.py search "gain_normalized ablation idea" --
 
 Resolve `<skill-dir>` to the directory containing this `SKILL.md`.
 
+## Obsidian Viewer Mode
+
+Treat Obsidian as a human viewer/editor over the same Git-tracked markdown files, not as a replacement storage system. The durable source of truth remains repository-local `history/`, Git review, and the CLI recall/index commands.
+
+New records created by the script include lightweight YAML frontmatter for Obsidian navigation (`type`, `title`, `date`, `status`, `tags`, and collaboration fields when available) while preserving the plain markdown metadata body used by agents. Do not rely on Obsidian's cache, remote vault internals, or plugin database as canonical project history.
+
+Run deterministic lint when adding Obsidian-style links or when notes become large:
+
+```bash
+python3 <skill-dir>/scripts/history.py lint
+python3 <skill-dir>/scripts/history.py lint --strict
+```
+
+`lint` reports broken `[[wiki links]]`, ambiguous note links, oversized pages, and records missing frontmatter. Warnings are advisory by default; `--strict` makes warnings fail.
+
 ## Start Of Work
 
 Before making substantial changes:
@@ -230,6 +245,7 @@ For non-trivial work, ensure the history reflects what actually happened:
 4. Run:
 
 ```bash
+python3 <skill-dir>/scripts/history.py lint
 python3 <skill-dir>/scripts/history.py index
 ```
 

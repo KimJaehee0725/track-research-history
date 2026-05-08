@@ -1,6 +1,6 @@
 # History Index
 
-Generated: 2026-05-09 02:59 +0900
+Generated: 2026-05-09 03:07 +0900
 
 ## Current Context
 
@@ -16,6 +16,7 @@ Generated: 2026-05-09 02:59 +0900
 
 ### changes
 
+- `history/changes/2026-05-09-030730-obsidian-viewer-frontmatter-history-lint.md` - Change - Obsidian viewer용 frontmatter와 history lint 추가
 - `history/changes/2026-05-09-025513-bm25-backend-sqlite-fts5-obsidian.md` - Change - BM25 backend을 SQLite FTS5로 교체하고 Obsidian 전환 메모 추가
 - `history/changes/2026-05-08-191426-bm25-markdown-aware-virtual-chunk.md` - Change - BM25 검색을 markdown-aware virtual chunk로 전환
 - `history/changes/2026-05-08-190555-change.md` - Change - 사용자 언어 기반 기록 정책 추가

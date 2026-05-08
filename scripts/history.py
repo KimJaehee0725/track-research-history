@@ -17,6 +17,7 @@ TOKEN_PATTERN = r"(?u)\b[\w./:-]{2,}\b"
 CHUNK_TARGET_CHARS = 2200
 CHUNK_OVERLAP_CHARS = 250
 CHUNK_SMALL_FILE_THRESHOLD = 2600
+OBSIDIAN_LINT_MAX_CHARS = 12000
 RECORD_DIRS = [
     "daily",
     "changes",
@@ -594,10 +595,14 @@ def ensure_collab(root: Path) -> None:
     overview_template = history / "templates" / "collab-canonical-overview.md"
     overview = history / "canonical" / "overview.md"
     if not overview.exists():
-        overview.write_text(
-            overview_template.read_text(encoding="utf-8").replace("{{date}}", display_time()),
-            encoding="utf-8",
+        text = overview_template.read_text(encoding="utf-8").replace("{{date}}", display_time())
+        text = add_obsidian_frontmatter(
+            text,
+            "canonical",
+            "Canonical Research Overview",
+            {"approval_status": "accepted", "archived": False},
         )
+        overview.write_text(text, encoding="utf-8")
     write_if_missing(
         history / "tasks" / "README.md",
         """# Collaboration Tasks
@@ -678,6 +683,7 @@ def ensure_collab_task(root: Path, task: str, workstreams: list[str] | None = No
             .replace("{{blocker}}", "-")
             .replace("{{date}}", display_time())
         )
+        text = add_obsidian_frontmatter(text, "task-context", f"Task {task_id} Context")
         context.write_text(text, encoding="utf-8")
     for workstream in workstreams or []:
         path = workstream_context_path(root, task_id, workstream)
@@ -689,6 +695,11 @@ def ensure_collab_task(root: Path, task: str, workstreams: list[str] | None = No
                 .replace("{{owner}}", "-")
                 .replace("{{status}}", "draft")
                 .replace("{{date}}", display_time())
+            )
+            text = add_obsidian_frontmatter(
+                text,
+                "workstream",
+                f"Workstream {normalize_collab_id(workstream, 'workstream')} Context",
             )
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(text, encoding="utf-8")
@@ -706,14 +717,174 @@ def detect_sensitive_warnings(named_texts: list[tuple[str, str | None]]) -> list
     return sorted(set(warnings))
 
 
-def parse_metadata(text: str) -> dict[str, str]:
+def metadata_key(key: str) -> str:
+    return key.strip().lower().replace("_", " ")
+
+
+def frontmatter_key(key: str) -> str:
+    value_text = key.strip().lower()
+    value_text = re.sub(r"[^a-z0-9]+", "_", value_text)
+    return value_text.strip("_")
+
+
+def frontmatter_bounds(text: str) -> tuple[int, int] | None:
+    if not text.startswith("---\n"):
+        return None
+    match = re.search(r"^---\s*$", text[4:], flags=re.MULTILINE)
+    if not match:
+        return None
+    return (4, 4 + match.start())
+
+
+def has_frontmatter(text: str) -> bool:
+    return frontmatter_bounds(text) is not None
+
+
+def strip_frontmatter(text: str) -> str:
+    bounds = frontmatter_bounds(text)
+    if not bounds:
+        return text
+    _, body_end = bounds
+    closing = re.search(r"^---\s*$", text[body_end:], flags=re.MULTILINE)
+    if not closing:
+        return text
+    return text[body_end + closing.end() :].lstrip("\n")
+
+
+def parse_yaml_scalar(value_text: str) -> str:
+    value_text = value_text.strip()
+    if value_text in {"[]", "{}"}:
+        return ""
+    if value_text.lower() == "true":
+        return "yes"
+    if value_text.lower() == "false":
+        return "no"
+    if len(value_text) >= 2 and value_text[0] == value_text[-1] == '"':
+        return value_text[1:-1].replace('\\"', '"').replace("\\\\", "\\")
+    if len(value_text) >= 2 and value_text[0] == value_text[-1] == "'":
+        return value_text[1:-1].replace("''", "'")
+    if value_text.startswith("[") and value_text.endswith("]"):
+        return value_text[1:-1].strip()
+    return value_text
+
+
+def parse_frontmatter(text: str) -> dict[str, str]:
+    bounds = frontmatter_bounds(text)
+    if not bounds:
+        return {}
+    start, end = bounds
     meta: dict[str, str] = {}
-    for line in text.splitlines():
+    for line in text[start:end].splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        match = re.match(r"^([A-Za-z][A-Za-z0-9_-]*):\s*(.*)$", line)
+        if match:
+            meta[metadata_key(match.group(1))] = parse_yaml_scalar(match.group(2))
+    return meta
+
+
+def yaml_quote(value_text: str) -> str:
+    return '"' + value_text.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def yaml_value(value_obj: object) -> str:
+    if isinstance(value_obj, bool):
+        return "true" if value_obj else "false"
+    if isinstance(value_obj, (list, tuple)):
+        if not value_obj:
+            return "[]"
+        return "[" + ", ".join(yaml_value(item) for item in value_obj) + "]"
+    value_text = str(value_obj).strip()
+    if not value_text or value_text == "-":
+        return yaml_quote(value_text or "-")
+    if value_text.lower() in {"true", "false", "yes", "no", "null"}:
+        return yaml_quote(value_text)
+    if re.fullmatch(r"[A-Za-z0-9_./:+-]+", value_text):
+        return value_text
+    return yaml_quote(value_text)
+
+
+def frontmatter_block(fields: dict[str, object]) -> str:
+    lines = ["---"]
+    for key, value_obj in fields.items():
+        lines.append(f"{frontmatter_key(key)}: {yaml_value(value_obj)}")
+    lines.append("---")
+    return "\n".join(lines) + "\n"
+
+
+def split_tags(value_text: str | None) -> list[str]:
+    if not value_text or value_text.strip() == "-":
+        return []
+    tags: list[str] = []
+    for item in re.split(r"[, ]+", value_text):
+        cleaned = item.strip().lstrip("#")
+        if cleaned and cleaned not in tags:
+            tags.append(cleaned)
+    return tags
+
+
+def add_obsidian_frontmatter(
+    text: str,
+    record_type: str,
+    title: str,
+    extra_fields: dict[str, object] | None = None,
+) -> str:
+    if has_frontmatter(text):
+        return text
+    meta = parse_metadata(text)
+    fields: dict[str, object] = {
+        "type": record_type,
+        "title": title,
+        "date": meta.get("date") or meta.get("date imported") or display_time(),
+    }
+    status = meta.get("status") or meta.get("approval status")
+    if status:
+        fields["status"] = status
+    tags = ["history", record_type]
+    for tag in split_tags(meta.get("tags")):
+        if tag not in tags:
+            tags.append(tag)
+    fields["tags"] = tags
+    for key in ["task", "workstream", "agent", "person"]:
+        if meta.get(key) and meta[key] != "-":
+            fields[key] = meta[key]
+    for key in ["approval status", "promoted to", "archived date", "archived from"]:
+        if meta.get(key):
+            fields[key] = meta[key]
+    if meta.get("archived"):
+        fields["archived"] = normalized_status(meta.get("archived")) in {"yes", "true", "archived"}
+    if extra_fields:
+        fields.update(extra_fields)
+    return frontmatter_block(fields) + text.lstrip("\n")
+
+
+def set_frontmatter_field(text: str, key: str, value_text: str) -> str:
+    bounds = frontmatter_bounds(text)
+    if not bounds:
+        return text
+    start, end = bounds
+    yaml_key = frontmatter_key(key)
+    value_obj: object = value_text
+    if yaml_key == "archived":
+        value_obj = normalized_status(value_text) in {"yes", "true", "archived"}
+    replacement = f"{yaml_key}: {yaml_value(value_obj)}"
+    body = text[start:end]
+    pattern = re.compile(rf"^({re.escape(yaml_key)}:\s*).*$", re.MULTILINE)
+    if pattern.search(body):
+        body = pattern.sub(replacement, body, count=1)
+    else:
+        body = body.rstrip() + "\n" + replacement + "\n"
+    return text[:start] + body + text[end:]
+
+
+def parse_metadata(text: str) -> dict[str, str]:
+    meta: dict[str, str] = parse_frontmatter(text)
+    for line in strip_frontmatter(text).splitlines():
         if line.startswith("## "):
             break
         match = re.match(r"^([A-Za-z][A-Za-z /_-]*):\s*(.*)$", line)
         if match:
-            meta[match.group(1).strip().lower()] = match.group(2).strip()
+            meta[metadata_key(match.group(1))] = match.group(2).strip()
     return meta
 
 
@@ -722,7 +893,7 @@ def metadata_value(path: Path, key: str, default: str = "-") -> str:
         meta = parse_metadata(path.read_text(encoding="utf-8"))
     except Exception:
         return default
-    return meta.get(key.lower(), default) or default
+    return meta.get(metadata_key(key), default) or default
 
 
 def normalized_status(text: str | None) -> str:
@@ -778,6 +949,7 @@ def extract_section(text: str, heading: str) -> str:
 
 
 def set_metadata_line(text: str, key: str, value_text: str) -> str:
+    text = set_frontmatter_field(text, key, value_text)
     pattern = re.compile(rf"^({re.escape(key)}:\s*).*$", re.MULTILINE)
     if pattern.search(text):
         return pattern.sub(lambda match: match.group(1) + value_text, text, count=1)
@@ -797,7 +969,24 @@ def today_file(root: Path) -> Path:
     path = root / HISTORY_DIR / "daily" / f"{date_stamp()}.md"
     if not path.exists():
         tmpl = (root / HISTORY_DIR / "templates" / "daily.md").read_text(encoding="utf-8")
-        path.write_text(tmpl.replace("{{date}}", date_stamp()), encoding="utf-8")
+        text = tmpl.replace("{{date}}", date_stamp())
+        text = add_obsidian_frontmatter(
+            text,
+            "daily",
+            f"Daily Log - {date_stamp()}",
+            {"date": date_stamp(), "tags": ["history", "daily"]},
+        )
+        path.write_text(text, encoding="utf-8")
+    else:
+        text = path.read_text(encoding="utf-8")
+        if not has_frontmatter(text):
+            text = add_obsidian_frontmatter(
+                text,
+                "daily",
+                f"Daily Log - {date_stamp()}",
+                {"date": date_stamp(), "tags": ["history", "daily"]},
+            )
+            path.write_text(text, encoding="utf-8")
     return path
 
 
@@ -837,6 +1026,7 @@ def git_status(root: Path) -> str:
 def write_record(root: Path, folder: str, filename: str, text: str, kind: str, title: str) -> Path:
     ensure_history(root)
     out = root / HISTORY_DIR / folder / filename
+    text = add_obsidian_frontmatter(text, kind, title)
     out.write_text(text, encoding="utf-8")
     append_daily(root, kind, title, out)
     build_index(root)
@@ -1286,7 +1476,7 @@ def best_excerpt(text: str, query_tokens: list[str], max_chars: int = 260) -> st
 
 
 def first_nonempty_line(text: str) -> str:
-    for line in text.splitlines():
+    for line in strip_frontmatter(text).splitlines():
         stripped = line.strip()
         if stripped:
             return stripped
@@ -1794,6 +1984,116 @@ def iter_search_files(root: Path) -> list[Path]:
     return sorted(iter_history_files(root), key=rank)
 
 
+def lint_requires_frontmatter(root: Path, path: Path) -> bool:
+    if path.name in {"CONTEXT.md", "INDEX.md", "README.md"}:
+        return False
+    parts = path.relative_to(root).parts
+    if "templates" in parts:
+        return False
+    return HISTORY_DIR in parts
+
+
+def wikilink_target(raw: str) -> str:
+    target = raw.split("|", 1)[0].split("#", 1)[0].strip()
+    if target.endswith(".md"):
+        target = target[:-3]
+    return target.strip("/")
+
+
+def note_indexes(root: Path) -> tuple[set[str], dict[str, list[Path]]]:
+    history = root / HISTORY_DIR
+    path_index: set[str] = set()
+    stem_index: dict[str, list[Path]] = {}
+    for path in iter_history_files(root):
+        if path.name == "INDEX.md":
+            continue
+        history_rel = path.relative_to(history).with_suffix("").as_posix()
+        root_rel = path.relative_to(root).with_suffix("").as_posix()
+        path_index.add(history_rel)
+        path_index.add(root_rel)
+        stem_index.setdefault(path.stem.lower(), []).append(path)
+    return path_index, stem_index
+
+
+def resolve_wikilink(
+    target: str,
+    path_index: set[str],
+    stem_index: dict[str, list[Path]],
+) -> tuple[str, list[Path]]:
+    if not target:
+        return ("local-anchor", [])
+    normalized = target[:-3] if target.endswith(".md") else target
+    normalized = normalized.strip("/")
+    if "/" in normalized:
+        if normalized in path_index:
+            return ("ok", [])
+        if f"{HISTORY_DIR}/{normalized}" in path_index:
+            return ("ok", [])
+        return ("missing", [])
+    matches = stem_index.get(normalized.lower(), [])
+    if not matches:
+        return ("missing", [])
+    if len(matches) > 1:
+        return ("ambiguous", matches)
+    return ("ok", matches)
+
+
+def format_lint_section(title: str, items: list[str]) -> list[str]:
+    lines = [f"## {title}", ""]
+    if items:
+        lines.extend(f"- {item}" for item in items)
+    else:
+        lines.append("- none")
+    lines.append("")
+    return lines
+
+
+def lint_history(root: Path, max_chars: int) -> tuple[list[str], list[str]]:
+    ensure_history(root)
+    errors: list[str] = []
+    warnings: list[str] = []
+    path_index, stem_index = note_indexes(root)
+    wikilink_pattern = re.compile(r"\[\[([^\]]+)\]\]")
+
+    for path in sorted(iter_history_files(root), key=lambda p: rel(root, p)):
+        relative = rel(root, path)
+        try:
+            text = path.read_text(encoding="utf-8")
+        except Exception as exc:
+            errors.append(f"{relative}: cannot read file ({exc})")
+            continue
+
+        if lint_requires_frontmatter(root, path) and not has_frontmatter(text):
+            warnings.append(f"{relative}: missing YAML frontmatter for Obsidian navigation.")
+
+        if len(text) > max_chars:
+            warnings.append(f"{relative}: oversized note ({len(text)} chars > {max_chars}); split or archive if it becomes hard to scan.")
+
+        for match in wikilink_pattern.finditer(text):
+            raw_target = match.group(1).strip()
+            target = wikilink_target(raw_target)
+            state, matches = resolve_wikilink(target, path_index, stem_index)
+            if state == "missing":
+                errors.append(f"{relative}: broken wikilink [[{raw_target}]]")
+            elif state == "ambiguous":
+                choices = ", ".join(rel(root, item) for item in sorted(matches)[:5])
+                warnings.append(f"{relative}: ambiguous wikilink [[{raw_target}]] matches {choices}")
+
+    return errors, warnings
+
+
+def cmd_lint(args: argparse.Namespace) -> None:
+    root = detect_root(args.root)
+    errors, warnings = lint_history(root, args.max_chars)
+    lines = ["# History Lint", ""]
+    lines.extend(format_lint_section("Errors", errors))
+    lines.extend(format_lint_section("Warnings", warnings))
+    lines.append(f"Summary: errors={len(errors)} warnings={len(warnings)}")
+    print("\n".join(lines))
+    if errors or (args.strict and warnings):
+        raise SystemExit(1)
+
+
 def clip(text: str, limit: int = 2800) -> str:
     if len(text) <= limit:
         return text
@@ -1962,6 +2262,21 @@ def cmd_collab_submit_summary(args: argparse.Namespace) -> None:
     text = set_metadata_line(text, "Promoted To", "-")
     text = set_metadata_line(text, "Archived", "no")
     text = set_metadata_line(text, "Archived Date", "-")
+    text = add_obsidian_frontmatter(
+        text,
+        "inbox",
+        title,
+        {
+            "task": task,
+            "workstream": workstream,
+            "person": value(args.person),
+            "agent": value(args.agent),
+            "approval_status": "submitted",
+            "promoted_to": "-",
+            "archived": False,
+            "archived_date": "-",
+        },
+    )
     inbox = root / HISTORY_DIR / "inbox" / filename
     inbox.write_text(text, encoding="utf-8")
     append_daily(root, "collab-summary", title, inbox)
@@ -2116,6 +2431,18 @@ def cmd_collab_promote(args: argparse.Namespace) -> None:
                 value(args.consequence) if args.consequence else value(extract_section(raw, "Open Questions")),
                 "",
             ]
+        )
+        decision_text = add_obsidian_frontmatter(
+            decision_text,
+            "decision",
+            title,
+            {
+                "task": task,
+                "workstream": workstream,
+                "status": "accepted",
+                "approval_status": "accepted",
+                "archived": False,
+            },
         )
         target.write_text(decision_text, encoding="utf-8")
         append_daily(root, "decision", title, target)
@@ -2838,6 +3165,16 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("recent", help="List recent history records.")
     p.add_argument("--limit", type=int, default=12)
     p.set_defaults(func=cmd_recent)
+
+    p = sub.add_parser("lint", help="Check history/ for Obsidian-friendly metadata and wikilinks.")
+    p.add_argument(
+        "--max-chars",
+        type=int,
+        default=OBSIDIAN_LINT_MAX_CHARS,
+        help=f"Warn when a note exceeds this size. Defaults to {OBSIDIAN_LINT_MAX_CHARS}.",
+    )
+    p.add_argument("--strict", action="store_true", help="Treat warnings as failures.")
+    p.set_defaults(func=cmd_lint)
 
     p = sub.add_parser("recall", help="Print context, latest daily log, recent records, and optional query hits.")
     p.add_argument("--query")

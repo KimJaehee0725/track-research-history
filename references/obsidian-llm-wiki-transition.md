@@ -60,7 +60,8 @@ Obsidian의 vault는 기본적으로 local filesystem folder다. note는 markdow
 
 - Keep: Git-tracked repository-local `history/` remains the durable source of truth.
 - Keep: SQLite FTS5 BM25 remains the agent recall backend.
-- Add later: Obsidian-friendly frontmatter, wiki links, and graph-friendly page conventions.
+- Add now: Obsidian-friendly frontmatter and deterministic `history.py lint` for broken wiki links, ambiguous links, oversized pages, and missing frontmatter.
+- Add later: richer graph-friendly page conventions or curated synthesis pages if the existing record layer becomes too flat.
 - Do not adopt now: Obsidian remote vault or internal cache as the canonical storage layer.
 - Do not adopt now: separate LLM-owned compiled wiki that diverges from the existing `history/` records.
 

@@ -240,6 +240,7 @@ Mention the history record path in the final response when useful.
 Use history as a selective memory, not a prompt dump:
 
 - Prefer `recall --query "<specific subsystem or idea>"` over loading every file.
+- BM25 search runs over virtual markdown-aware chunks: small files stay whole, while longer records split by `##` section and paragraph-sized chunks with overlap. Read the reported chunk heading and line number before opening the full file.
 - Use `search "<query>"` for BM25S-ranked retrieval; use `search --exact "<string>"` or `exact "<string>"` only when you need literal substring matches.
 - Treat generated query variants as proposed search angles. If a variant is off-target, rerun with a more specific query.
 - Treat reflection notes as retrieval QA: absent tokens, weak results, or one-type-only hits mean you should verify current files or refine the query before relying on the result.

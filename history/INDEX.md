@@ -1,6 +1,6 @@
 # History Index
 
-Generated: 2026-05-08 19:05 +0900
+Generated: 2026-05-08 19:14 +0900
 
 ## Current Context
 
@@ -15,6 +15,7 @@ Generated: 2026-05-08 19:05 +0900
 
 ### changes
 
+- `history/changes/2026-05-08-191426-bm25-markdown-aware-virtual-chunk.md` - Change - BM25 검색을 markdown-aware virtual chunk로 전환
 - `history/changes/2026-05-08-190555-change.md` - Change - 사용자 언어 기반 기록 정책 추가
 - `history/changes/2026-05-08-022128-add-collaboration-archive-workflow.md` - Change - Add collaboration archive workflow
 - `history/changes/2026-05-08-020723-fix-collaboration-workflow-review-findings.md` - Change - Fix collaboration workflow review findings

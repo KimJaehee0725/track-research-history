@@ -53,6 +53,8 @@ python3 <skill-dir>/scripts/history.py exact "gain_normalized" --limit 20
 
 Use exact field names, file names, method names, experiment ids, figure names, or paper-section names as queries.
 
+BM25 indexing uses virtual chunks rather than treating every file as one large search document. Files up to 2600 characters stay as one chunk. Longer records are split by markdown `##` sections first, then by paragraph groups, with a 2200-character target and about 250 characters of overlap. Each chunk carries the file metadata prefix so task, workstream, approval, and provenance context stay visible. Search output reports the source file, chunk number, heading, line start, approval, and archive status.
+
 The search command performs three steps:
 
 1. Generate deterministic query variants from the original query, identifier/path splits, and intent words such as why, idea, experiment, code, or handoff.

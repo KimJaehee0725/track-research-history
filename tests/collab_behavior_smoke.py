@@ -655,6 +655,44 @@ class CollabBehaviorSmokeTests(unittest.TestCase):
         self.assertIn("archive_status=archived", archive_recall)
         self.assertLess(elapsed, 60)
 
+    def test_bm25_search_reports_section_aware_virtual_chunks(self) -> None:
+        root, cli = self.with_cli()
+        cli.run("bootstrap")
+        long_record = root / "history" / "changes" / "2026-05-08-000000-long-chunk-record.md"
+        first_payload = "alpha context " * 260
+        second_payload = "beta context " * 260
+        marker = "TAIL_CHUNK_SECTION_MARKER"
+        long_record.write_text(
+            "\n".join(
+                [
+                    "# Change - Long Chunk Record",
+                    "",
+                    "Date: 2026-05-08 00:00 +0900",
+                    "Agent: codex",
+                    "Status: completed",
+                    "",
+                    "## First Section",
+                    "",
+                    first_payload,
+                    "",
+                    "## Second Section",
+                    "",
+                    second_payload,
+                    "",
+                    marker,
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        search = cli.run("search", marker, "--limit", "5", "--no-variants").stdout
+
+        self.assertIn(str(long_record.relative_to(root)), search)
+        self.assertIn(marker, search)
+        self.assertIn("heading=Second Section", search)
+        self.assertRegex(search, re.compile(r"location=chunk [2-9][0-9]*/|location=chunk [2-9]/"))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

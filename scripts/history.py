@@ -18,6 +18,9 @@ if str(VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(VENDOR_DIR))
 
 TOKEN_PATTERN = r"(?u)\b[\w./:-]{2,}\b"
+CHUNK_TARGET_CHARS = 2200
+CHUNK_OVERLAP_CHARS = 250
+CHUNK_SMALL_FILE_THRESHOLD = 2600
 RECORD_DIRS = [
     "daily",
     "changes",
@@ -969,32 +972,195 @@ def bm25_documents(root: Path) -> list[dict[str, str]]:
             raw = path.read_text(encoding="utf-8")
         except Exception:
             continue
-        relative_path = rel(root, path)
-        title = first_heading(path)
-        kind = record_kind(path)
-        path_terms = split_identifier_text(relative_path)
-        title_terms = split_identifier_text(title)
+        docs.extend(
+            search_documents_for_file(
+                root=root,
+                path=path,
+                raw=raw,
+                approval=approval_status(path),
+                archive_state=archive_status(path),
+            )
+        )
+    return docs
+
+
+def metadata_context(text: str) -> str:
+    first_section = re.search(r"^##\s+", text, flags=re.MULTILINE)
+    if not first_section:
+        return ""
+    return text[: first_section.start()].strip()
+
+
+def markdown_sections(text: str) -> list[tuple[str, str, int]]:
+    matches = list(re.finditer(r"^##\s+(.+?)\s*$", text, flags=re.MULTILINE))
+    if not matches:
+        return [(first_nonempty_line(text) or "Full Record", text, 0)]
+
+    sections: list[tuple[str, str, int]] = []
+    for idx, match in enumerate(matches):
+        start = match.start()
+        end = matches[idx + 1].start() if idx + 1 < len(matches) else len(text)
+        heading = match.group(1).strip() or "Section"
+        sections.append((heading, text[start:end], start))
+    return sections
+
+
+def paragraph_spans(text: str) -> list[tuple[int, int]]:
+    spans: list[tuple[int, int]] = []
+    start = 0
+    for match in re.finditer(r"\n\s*\n", text):
+        end = match.end()
+        if text[start:end].strip():
+            spans.append((start, end))
+        start = end
+    if text[start:].strip():
+        spans.append((start, len(text)))
+    return spans
+
+
+def char_spans(start: int, end: int, target_chars: int, overlap_chars: int) -> list[tuple[int, int]]:
+    spans: list[tuple[int, int]] = []
+    cursor = start
+    while cursor < end:
+        chunk_end = min(end, cursor + target_chars)
+        spans.append((cursor, chunk_end))
+        if chunk_end >= end:
+            break
+        cursor = max(cursor + 1, chunk_end - overlap_chars)
+    return spans
+
+
+def split_text_spans(text: str, target_chars: int, overlap_chars: int) -> list[tuple[int, int]]:
+    if len(text) <= target_chars:
+        return [(0, len(text))]
+
+    paragraphs = paragraph_spans(text)
+    if not paragraphs:
+        return char_spans(0, len(text), target_chars, overlap_chars)
+
+    spans: list[tuple[int, int]] = []
+    current_start: int | None = None
+    current_end: int | None = None
+    for para_start, para_end in paragraphs:
+        if para_end - para_start > target_chars:
+            if current_start is not None and current_end is not None:
+                spans.append((current_start, current_end))
+                current_start = None
+                current_end = None
+            spans.extend(char_spans(para_start, para_end, target_chars, overlap_chars))
+            continue
+
+        if current_start is None:
+            current_start = para_start
+            current_end = para_end
+        elif para_end - current_start <= target_chars:
+            current_end = para_end
+        else:
+            spans.append((current_start, current_end or para_start))
+            current_start = max(0, para_start - overlap_chars)
+            current_end = para_end
+
+    if current_start is not None and current_end is not None:
+        spans.append((current_start, current_end))
+    return spans
+
+
+def line_number_at(text: str, char_offset: int) -> int:
+    bounded = max(0, min(char_offset, len(text)))
+    return text.count("\n", 0, bounded) + 1
+
+
+def record_text_chunks(text: str) -> list[dict[str, str]]:
+    if len(text) <= CHUNK_SMALL_FILE_THRESHOLD:
+        return [
+            {
+                "text": text,
+                "heading": first_nonempty_line(text) or "Full Record",
+                "line_start": "1",
+                "chunk_id": "1",
+                "chunk_count": "1",
+            }
+        ]
+
+    context = metadata_context(text)
+    chunks: list[dict[str, str]] = []
+    for heading, section_text, section_start in markdown_sections(text):
+        for span_start, span_end in split_text_spans(section_text, CHUNK_TARGET_CHARS, CHUNK_OVERLAP_CHARS):
+            body = section_text[span_start:span_end].strip()
+            if not body:
+                continue
+            chunk_text = "\n\n".join(part for part in [context, body] if part).strip()
+            chunks.append(
+                {
+                    "text": chunk_text,
+                    "heading": heading,
+                    "line_start": str(line_number_at(text, section_start + span_start)),
+                }
+            )
+
+    if not chunks:
+        return [
+            {
+                "text": text,
+                "heading": first_nonempty_line(text) or "Full Record",
+                "line_start": "1",
+                "chunk_id": "1",
+                "chunk_count": "1",
+            }
+        ]
+
+    total = str(len(chunks))
+    for idx, chunk in enumerate(chunks, 1):
+        chunk["chunk_id"] = str(idx)
+        chunk["chunk_count"] = total
+    return chunks
+
+
+def search_documents_for_file(
+    root: Path,
+    path: Path,
+    raw: str,
+    approval: str,
+    archive_state: str,
+) -> list[dict[str, str]]:
+    relative_path = rel(root, path)
+    title = first_heading(path)
+    kind = record_kind(path)
+    path_terms = split_identifier_text(relative_path)
+    title_terms = split_identifier_text(title)
+    docs: list[dict[str, str]] = []
+    for chunk in record_text_chunks(raw):
+        heading = chunk["heading"]
+        heading_terms = split_identifier_text(heading)
         weighted_text = "\n".join(
             [
                 title,
                 title_terms,
                 title_terms,
+                heading,
+                heading_terms,
                 relative_path,
                 path_terms,
                 path_terms,
                 kind,
                 kind,
-                raw,
+                approval,
+                archive_state,
+                chunk["text"],
             ]
         )
         docs.append(
             {
                 "path": relative_path,
                 "title": title,
+                "heading": heading,
+                "line_start": chunk["line_start"],
+                "chunk_id": chunk["chunk_id"],
+                "chunk_count": chunk["chunk_count"],
                 "kind": kind,
-                "approval": approval_status(path),
-                "archive_status": archive_status(path),
-                "text": raw,
+                "approval": approval,
+                "archive_status": archive_state,
+                "text": chunk["text"],
                 "index_text": weighted_text,
             }
         )
@@ -1128,6 +1294,7 @@ def bm25_search_documents(docs: list[dict[str, str]], query: str, limit: int = 8
         [token for token in query_counter if token not in vocab and token not in original_unknown]
     )
     found_tokens = sorted([token for token in query_counter if token in vocab])
+    excerpt_tokens = [token for token in original_query_tokens if token in vocab] or found_tokens or all_query_tokens
 
     results = []
     for idx, score in ranked[:limit]:
@@ -1139,11 +1306,15 @@ def bm25_search_documents(docs: list[dict[str, str]], query: str, limit: int = 8
                 "score": score,
                 "path": doc["path"],
                 "title": doc["title"],
+                "heading": doc.get("heading", ""),
+                "line_start": doc.get("line_start", "1"),
+                "chunk_id": doc.get("chunk_id", "1"),
+                "chunk_count": doc.get("chunk_count", "1"),
                 "kind": doc["kind"],
                 "approval": doc.get("approval", "unknown"),
                 "archive_status": doc.get("archive_status", "active"),
                 "variants": sorted(set(contributing[idx])),
-                "excerpt": best_excerpt(doc["text"], found_tokens or all_query_tokens),
+                "excerpt": best_excerpt(doc["text"], excerpt_tokens),
             }
         )
 
@@ -1214,6 +1385,10 @@ def print_bm25_payload(payload: dict, show_variants: bool = True) -> None:
         print(
             f"   score={result['score']:.4f}; kind={result['kind']}; "
             f"approval={approval}; archive_status={archive_state}; matched={variants}"
+        )
+        print(
+            f"   location=chunk {result.get('chunk_id', '1')}/{result.get('chunk_count', '1')}; "
+            f"line={result.get('line_start', '1')}; heading={result.get('heading') or '-'}"
         )
         print(f"   excerpt: {result['excerpt']}")
     print("")
@@ -2136,32 +2311,14 @@ def collab_documents(
             raw = path.read_text(encoding="utf-8")
         except Exception:
             continue
-        relative_path = rel(root, path)
-        title = first_heading(path)
-        kind = record_kind(path)
-        status = approval_status(path)
-        weighted_text = "\n".join(
-            [
-                title,
-                split_identifier_text(title),
-                relative_path,
-                split_identifier_text(relative_path),
-                kind,
-                kind,
-                status,
-                raw,
-            ]
-        )
-        docs.append(
-            {
-                "path": relative_path,
-                "title": title,
-                "kind": kind,
-                "approval": status,
-                "archive_status": archive_status(path),
-                "text": raw,
-                "index_text": weighted_text,
-            }
+        docs.extend(
+            search_documents_for_file(
+                root=root,
+                path=path,
+                raw=raw,
+                approval=approval_status(path),
+                archive_state=archive_status(path),
+            )
         )
     return docs
 

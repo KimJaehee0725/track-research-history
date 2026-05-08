@@ -1,6 +1,6 @@
 # History Index
 
-Generated: 2026-05-09 02:55 +0900
+Generated: 2026-05-09 02:59 +0900
 
 ## Current Context
 
@@ -25,7 +25,7 @@ Generated: 2026-05-09 02:55 +0900
 
 ### decisions
 
-- none
+- `history/decisions/0001-obsidian-viewer-editor-git-history-source-of-truth.md` - Decision 0001 - Obsidian은 viewer/editor로만 사용하고 Git history를 source of truth로 유지
 
 ### ideas
 

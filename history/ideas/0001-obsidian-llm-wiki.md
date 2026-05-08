@@ -10,11 +10,11 @@ Tags: obsidian, llm-wiki, architecture
 
 ## Hypothesis
 
-Obsidian vault를 raw source, compiled wiki, schema, log 계층으로 두고 agent가 wiki page와 backlinks를 관리하면 Karpathy식 LLM-Wiki의 compounding 장점을 가져오면서 기존 CLI/BM25는 검증과 fallback 검색으로 남길 수 있다.
+Git-tracked `history/`를 source of truth로 유지하고, Obsidian은 사람이 같은 markdown을 탐색하는 viewer/editor로만 두면 기존 CLI/BM25 흐름의 안정성을 유지하면서 Obsidian의 graph/backlink/frontmatter 장점을 선택적으로 쓸 수 있다.
 
 ## Expected Value
 
-사람은 Obsidian에서 그래프와 문서를 읽고, agent는 schema와 lint 규칙에 따라 wiki를 갱신한다. 단점은 hallucinated synthesis, link rot, merge conflict, scale 비용이므로 source citation, frontmatter schema, deterministic lint, raw-source immutability, BM25/vector fallback으로 보완한다.
+사람은 Obsidian에서 그래프와 문서를 읽고, agent는 기존처럼 Git-tracked history markdown과 SQLite FTS5 BM25 recall을 사용한다. 단점은 Obsidian-only metadata가 CLI에서 무의미해질 수 있다는 점이므로 plain markdown compatibility와 deterministic lint를 우선한다.
 
 ## Links / Evidence
 
@@ -22,4 +22,4 @@ Obsidian vault를 raw source, compiled wiki, schema, log 계층으로 두고 age
 
 ## Next Check
 
-obsidian-llm-wiki-experiment 브랜치에서 vault 구조와 migration plan을 먼저 문서화한 뒤, bootstrap/recall/record CLI를 vault-aware로 확장한다.
+obsidian-llm-wiki-experiment 브랜치에서 별도 vault 전환보다 Obsidian-friendly metadata/link conventions와 lint를 먼저 설계한다.

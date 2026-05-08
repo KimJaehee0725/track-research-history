@@ -1,6 +1,6 @@
 ---
 name: track-research-history
-description: Maintain durable research-project history while coding, with BM25S-based recall, generated query variants, retrieval reflection, handoff agent capsules, and maintainer-curated collaboration history for large benchmark projects. Use when Codex or Claude needs to automatically record and recall why code changed, how it was implemented, which files changed, which ideas or hypotheses led to it, experiment decisions, collaboration handoffs, agent transition context, task/workstream context, or canonical project context in a repository-level history/ folder or central history repo.
+description: Maintain durable research-project history while coding, with dependency-light SQLite FTS5 BM25 recall, generated query variants, retrieval reflection, handoff agent capsules, and maintainer-curated collaboration history for large benchmark projects. Use when Codex or Claude needs to automatically record and recall why code changed, how it was implemented, which files changed, which ideas or hypotheses led to it, experiment decisions, collaboration handoffs, agent transition context, task/workstream context, or canonical project context in a repository-level history/ folder or central history repo.
 ---
 
 # Track Research History
@@ -58,7 +58,7 @@ history/
   capsules/
 ```
 
-Use the bundled script for deterministic structure, filenames, indexing, and BM25S recall:
+Use the bundled script for deterministic structure, filenames, indexing, and SQLite FTS5 BM25 recall:
 
 ```bash
 python3 <skill-dir>/scripts/history.py bootstrap
@@ -241,7 +241,7 @@ Use history as a selective memory, not a prompt dump:
 
 - Prefer `recall --query "<specific subsystem or idea>"` over loading every file.
 - BM25 search runs over virtual markdown-aware chunks: small files stay whole, while longer records split by `##` section and paragraph-sized chunks with overlap. Read the reported chunk heading and line number before opening the full file.
-- Use `search "<query>"` for BM25S-ranked retrieval; use `search --exact "<string>"` or `exact "<string>"` only when you need literal substring matches.
+- Use `search "<query>"` for SQLite FTS5 BM25-ranked retrieval; use `search --exact "<string>"` or `exact "<string>"` only when you need literal substring matches.
 - Treat generated query variants as proposed search angles. If a variant is off-target, rerun with a more specific query.
 - Treat reflection notes as retrieval QA: absent tokens, weak results, or one-type-only hits mean you should verify current files or refine the query before relying on the result.
 - Follow links from `INDEX.md` only when they are relevant.

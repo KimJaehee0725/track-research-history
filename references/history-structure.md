@@ -42,7 +42,7 @@ Write free-form record prose in the user's working language by default. Keep fix
 
 ## Search Strategy
 
-Search uses the vendored `bm25s` implementation by default. Start broad, inspect generated variants and reflection, then narrow:
+Search uses SQLite FTS5's built-in `bm25()` ranking through Python's standard-library `sqlite3` module by default. Start broad, inspect generated variants and reflection, then narrow:
 
 ```bash
 python3 <skill-dir>/scripts/history.py recall --limit 8
@@ -58,7 +58,7 @@ BM25 indexing uses virtual chunks rather than treating every file as one large s
 The search command performs three steps:
 
 1. Generate deterministic query variants from the original query, identifier/path splits, and intent words such as why, idea, experiment, code, or handoff.
-2. Rank history records with BM25S.
+2. Rank history records with SQLite FTS5 `bm25()`.
 3. Print reflection notes about weak recall, missing query tokens, or over-concentrated result types.
 
 Use `exact` only as a fallback for literal string matching.
@@ -97,7 +97,7 @@ Collaboration records should keep this top metadata when applicable:
 
 ## Vendored Retrieval
 
-The bundled BM25 engine is `bm25s` from `https://github.com/xhluca/bm25s`, vendored under `scripts/vendor/bm25s` with its MIT license. It was chosen over `rank-bm25` because it is still lightweight while providing faster sparse scoring and a more complete retrieval API.
+The BM25 engine is SQLite FTS5's built-in `bm25()` auxiliary function, accessed through Python's standard-library `sqlite3` module. This avoids vendored Python search packages while keeping local lexical search fast enough for repository-scale history.
 
 ## Collaboration Notes
 

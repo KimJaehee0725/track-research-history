@@ -2,8 +2,8 @@
 from __future__ import annotations
 
 import argparse
-import json
 import re
+import sqlite3
 import subprocess
 import sys
 from collections import Counter
@@ -13,10 +13,6 @@ from pathlib import Path
 
 HISTORY_DIR = "history"
 SCRIPT_DIR = Path(__file__).resolve().parent
-VENDOR_DIR = SCRIPT_DIR / "vendor"
-if str(VENDOR_DIR) not in sys.path:
-    sys.path.insert(0, str(VENDOR_DIR))
-
 TOKEN_PATTERN = r"(?u)\b[\w./:-]{2,}\b"
 CHUNK_TARGET_CHARS = 2200
 CHUNK_OVERLAP_CHARS = 250
@@ -1167,28 +1163,70 @@ def search_documents_for_file(
     return docs
 
 
-def load_bm25s():
+def history_tokens(text: str) -> list[str]:
+    tokens: list[str] = []
+    seen: set[str] = set()
+    for token in re.findall(TOKEN_PATTERN, text.lower()):
+        candidates = [token]
+        expanded = split_identifier_text(token).lower()
+        if expanded and expanded != token:
+            candidates.extend(re.findall(TOKEN_PATTERN, expanded))
+        for candidate in candidates:
+            if len(candidate) < 2 or candidate in seen:
+                continue
+            tokens.append(candidate)
+            seen.add(candidate)
+    return tokens
+
+
+def fts_quote_token(token: str) -> str:
+    return '"' + token.replace('"', '""') + '"'
+
+
+def fts_query(tokens: list[str]) -> str:
+    return " OR ".join(fts_quote_token(token) for token in tokens)
+
+
+def sqlite_fts_connection(docs: list[dict[str, str]]) -> sqlite3.Connection:
+    con = sqlite3.connect(":memory:")
     try:
-        import bm25s  # type: ignore
-
-        return bm25s
-    except Exception as exc:
+        con.execute(
+            """
+            CREATE VIRTUAL TABLE search_docs USING fts5(
+                title,
+                heading,
+                path,
+                kind,
+                approval,
+                archive_status,
+                body
+            )
+            """
+        )
+    except sqlite3.OperationalError as exc:
         raise SystemExit(
-            "BM25S is unavailable. This skill vendors bm25s under scripts/vendor/bm25s; "
-            f"import failed with: {exc}"
+            "SQLite FTS5 is unavailable in this Python build. "
+            "Use a Python build with sqlite3 FTS5 support, or run literal `exact` search as a fallback."
         ) from exc
-
-
-def tokenize_texts(texts: list[str]):
-    bm25s = load_bm25s()
-    return bm25s.tokenize(
-        texts,
-        lower=True,
-        token_pattern=TOKEN_PATTERN,
-        stopwords=None,
-        return_ids=False,
-        show_progress=False,
+    con.executemany(
+        """
+        INSERT INTO search_docs(title, heading, path, kind, approval, archive_status, body)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (
+                doc["title"],
+                doc.get("heading", ""),
+                doc["path"],
+                doc["kind"],
+                doc.get("approval", "unknown"),
+                doc.get("archive_status", "active"),
+                doc["index_text"],
+            )
+            for doc in docs
+        ],
     )
+    return con
 
 
 def query_variants(query: str) -> list[tuple[str, str, float]]:
@@ -1227,6 +1265,8 @@ def query_variants(query: str) -> list[tuple[str, str, float]]:
 def best_excerpt(text: str, query_tokens: list[str], max_chars: int = 260) -> str:
     lowered_tokens = [token.lower() for token in query_tokens if token]
     fallback = ""
+    best_line = ""
+    best_score = 0
     for line in text.splitlines():
         stripped = line.strip()
         if not stripped:
@@ -1234,8 +1274,14 @@ def best_excerpt(text: str, query_tokens: list[str], max_chars: int = 260) -> st
         if not fallback and not stripped.startswith("#"):
             fallback = stripped
         lowered = stripped.lower()
-        if any(token in lowered for token in lowered_tokens):
-            return stripped[:max_chars]
+        matched = [token for token in lowered_tokens if token in lowered]
+        if matched:
+            score = sum(len(token) for token in set(matched))
+            if score > best_score:
+                best_score = score
+                best_line = stripped
+    if best_line:
+        return best_line[:max_chars]
     return (fallback or first_nonempty_line(text) or "-")[:max_chars]
 
 
@@ -1262,32 +1308,44 @@ def bm25_search_documents(docs: list[dict[str, str]], query: str, limit: int = 8
         payload["reflection"].append("The query was empty after normalization.")
         return payload
 
-    bm25s = load_bm25s()
-    corpus_tokens = tokenize_texts([doc["index_text"] for doc in docs])
-    retriever = bm25s.BM25(method="lucene", corpus=docs)
-    retriever.index(corpus_tokens, show_progress=False)
+    con = sqlite_fts_connection(docs)
+    vocab: set[str] = set()
+    for doc in docs:
+        vocab.update(history_tokens(doc["index_text"]))
 
     combined = [0.0 for _ in docs]
     contributing: list[list[str]] = [[] for _ in docs]
     all_query_tokens: list[str] = []
     original_query_tokens: list[str] = []
     for label, text, weight in variants:
-        tokenized = tokenize_texts([text])
-        tokens = tokenized[0] if tokenized else []
+        tokens = history_tokens(text)
         if label == "original":
             original_query_tokens = list(tokens)
         all_query_tokens.extend(tokens)
         if not tokens:
             continue
-        scores = retriever.get_scores(tokens)
-        for idx, score in enumerate(scores):
-            weighted = float(score) * weight
+        try:
+            rows = con.execute(
+                """
+                SELECT rowid, bm25(search_docs, 4.0, 3.0, 2.5, 1.5, 0.7, 0.7, 1.0) AS score
+                FROM search_docs
+                WHERE search_docs MATCH ?
+                ORDER BY score ASC
+                """,
+                (fts_query(tokens),),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            rows = []
+        for rowid, score in rows:
+            idx = int(rowid) - 1
+            if idx < 0 or idx >= len(docs):
+                continue
+            weighted = max(0.0, -float(score)) * weight
             if weighted > 0:
                 combined[idx] += weighted
                 contributing[idx].append(label)
 
     ranked = sorted(enumerate(combined), key=lambda item: item[1], reverse=True)
-    vocab = set(getattr(retriever, "vocab_dict", {}).keys())
     query_counter = Counter(all_query_tokens)
     original_unknown = sorted([token for token in set(original_query_tokens) if token not in vocab])
     generated_unknown = sorted(
@@ -2765,10 +2823,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--agent", default="codex")
     p.set_defaults(func=cmd_session)
 
-    p = sub.add_parser("search", help="Search history markdown files with BM25S ranking.")
+    p = sub.add_parser("search", help="Search history markdown files with SQLite FTS5 BM25 ranking.")
     p.add_argument("query")
     p.add_argument("--limit", type=int, default=20)
-    p.add_argument("--exact", action="store_true", help="Use exact substring matching instead of BM25S.")
+    p.add_argument("--exact", action="store_true", help="Use exact substring matching instead of SQLite FTS5 BM25.")
     p.add_argument("--no-variants", action="store_true", help="Hide generated query variants.")
     p.set_defaults(func=cmd_search)
 

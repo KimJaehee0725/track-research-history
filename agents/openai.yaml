@@ -1,4 +1,4 @@
 interface:
   display_name: "Track Research History"
   short_description: "Repo history, collaboration context, and recall"
-  default_prompt: "Use $track-research-history to recall relevant project history or collaboration context, then record code rationale, decisions, and handoff summaries in the user's working language as you work."
+  default_prompt: "Use $track-research-history to run read-only start context at session open, recall relevant project or collaboration history, then record code rationale, decisions, and handoff summaries in the user's working language before finish checks."

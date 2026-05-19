@@ -79,6 +79,14 @@ class HistoryCLI:
         return self.emitted_path(self.run(*args))
 
 
+def file_snapshot(root: Path) -> dict[str, bytes]:
+    snapshot: dict[str, bytes] = {}
+    for path in sorted(root.rglob("*")):
+        if path.is_file():
+            snapshot[path.relative_to(root).as_posix()] = path.read_bytes()
+    return snapshot
+
+
 class CollabBehaviorSmokeTests(unittest.TestCase):
     maxDiff = None
 
@@ -87,6 +95,72 @@ class CollabBehaviorSmokeTests(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         root = Path(tmp.name)
         return root, HistoryCLI(root)
+
+    def test_start_without_history_is_read_only(self) -> None:
+        root, cli = self.with_cli()
+        before = file_snapshot(root)
+
+        out = cli.run("start", "--query", "reward shaping").stdout
+
+        self.assertEqual(before, file_snapshot(root))
+        self.assertFalse((root / "history").exists())
+        self.assertIn("history/` not found", out)
+        self.assertIn("bootstrap", out)
+
+    def test_start_with_history_does_not_create_daily_or_index_updates(self) -> None:
+        root, cli = self.with_cli()
+        cli.run("bootstrap")
+        before = file_snapshot(root)
+
+        out = cli.run("start", "--query", "Project History", "--no-variants").stdout
+
+        self.assertEqual(before, file_snapshot(root))
+        self.assertFalse((root / "history" / "daily" / f"{time.strftime('%Y-%m-%d')}.md").exists())
+        self.assertIn("# Session Start", out)
+        self.assertIn("## BM25 Recall: Project History", out)
+
+    def test_finish_reports_lint_errors_without_creating_records(self) -> None:
+        root, cli = self.with_cli()
+        cli.run("bootstrap")
+        broken = root / "history" / "changes" / "broken-link.md"
+        broken.write_text(
+            "\n".join(
+                [
+                    "---",
+                    "type: change",
+                    'title: "Broken link"',
+                    "date: 2026-05-09",
+                    "tags: [history, change]",
+                    "---",
+                    "# Broken Link",
+                    "",
+                    "This points at [[Missing History Note]].",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        before = file_snapshot(root)
+
+        proc = cli.run("finish", check=False)
+
+        self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertEqual(before, file_snapshot(root))
+        self.assertIn("broken wikilink [[Missing History Note]]", proc.stdout)
+
+    def test_finish_guides_when_non_history_changes_lack_record(self) -> None:
+        root, cli = self.with_cli()
+        subprocess.run(["git", "-C", str(root), "init"], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        cli.run("bootstrap")
+        subprocess.run(["git", "-C", str(root), "add", "history"], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        source_dir = root / "src"
+        source_dir.mkdir()
+        (source_dir / "example.py").write_text("print('example')\n", encoding="utf-8")
+
+        out = cli.run("finish").stdout
+
+        self.assertIn("Non-history files changed, but no history record change is visible", out)
+        self.assertIn("src/example.py", out)
 
     def test_change_records_include_obsidian_frontmatter_and_pass_lint(self) -> None:
         _, cli = self.with_cli()

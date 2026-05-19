@@ -1011,10 +1011,13 @@ def next_id(folder: Path) -> str:
     return f"{highest + 1:04d}"
 
 
-def git_status(root: Path) -> str:
+def git_status(root: Path, untracked_all: bool = False) -> str:
     try:
+        command = ["git", "-C", str(root), "status", "--short"]
+        if untracked_all:
+            command.append("--untracked-files=all")
         out = subprocess.check_output(
-            ["git", "-C", str(root), "status", "--short"],
+            command,
             stderr=subprocess.STDOUT,
             text=True,
         ).strip()
@@ -2048,8 +2051,12 @@ def format_lint_section(title: str, items: list[str]) -> list[str]:
     return lines
 
 
-def lint_history(root: Path, max_chars: int) -> tuple[list[str], list[str]]:
-    ensure_history(root)
+def lint_history(root: Path, max_chars: int, ensure: bool = True) -> tuple[list[str], list[str]]:
+    if ensure:
+        ensure_history(root)
+    elif not (root / HISTORY_DIR).exists():
+        return [], [f"{HISTORY_DIR}/ is missing; run `history.py bootstrap` before tracking durable history."]
+
     errors: list[str] = []
     warnings: list[str] = []
     path_index, stem_index = note_indexes(root)
@@ -2147,6 +2154,164 @@ def cmd_recent(args: argparse.Namespace) -> None:
     ensure_history(root)
     for path in iter_history_files(root)[: args.limit]:
         print(f"{rel(root, path)} - {first_heading(path)}")
+
+
+def latest_history_file(root: Path, folder: str) -> Path | None:
+    base = root / HISTORY_DIR / folder
+    if not base.exists():
+        return None
+    files = sorted(base.glob("*.md"), key=lambda p: p.stat().st_mtime, reverse=True)
+    return files[0] if files else None
+
+
+def latest_handoff_paths(root: Path, limit: int) -> list[Path]:
+    paths: list[Path] = []
+    for folder in ["capsules", "handoffs"]:
+        base = root / HISTORY_DIR / folder
+        if base.exists():
+            paths.extend(base.glob("*.md"))
+    return sorted(paths, key=lambda p: p.stat().st_mtime, reverse=True)[:limit]
+
+
+def record_brief(path: Path) -> str:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except Exception:
+        return "-"
+    for heading in ["Current State", "Summary", "Next Actions", "Open Risks"]:
+        section = extract_section(text, heading)
+        line = first_nonempty_line(section)
+        if line and line != "-":
+            return line[:220]
+    return first_nonempty_line(text)[:220] or "-"
+
+
+def status_lines(root: Path, status_text: str | None = None) -> list[str]:
+    status = status_text if status_text is not None else git_status(root)
+    if status == "clean" or status.startswith("unavailable:"):
+        return []
+    return [line for line in status.splitlines() if line.strip()]
+
+
+def status_path(line: str) -> str:
+    line = line.rstrip()
+    if len(line) >= 3 and line[2] == " ":
+        path = line[3:].strip()
+    elif len(line) >= 2 and line[1] == " ":
+        path = line[2:].strip()
+    else:
+        parts = line.split(maxsplit=1)
+        path = parts[1].strip() if len(parts) == 2 else ""
+    if " -> " in path:
+        path = path.split(" -> ", 1)[1].strip()
+    return path
+
+
+def is_history_record_path(path_text: str) -> bool:
+    record_folders = ("changes", "decisions", "ideas", "experiments", "handoffs", "capsules", "sessions", "inbox")
+    return path_text.endswith(".md") and any(path_text.startswith(f"{HISTORY_DIR}/{folder}/") for folder in record_folders)
+
+
+def cmd_start(args: argparse.Namespace) -> None:
+    root = detect_root(args.root)
+    history = root / HISTORY_DIR
+    print(f"# Session Start ({root})")
+    print("")
+    if not history.exists():
+        print(f"- `{HISTORY_DIR}/` not found.")
+        print("- Run `python3 <skill-dir>/scripts/history.py bootstrap` before recording durable history.")
+        return
+
+    context = history / "CONTEXT.md"
+    if context.exists():
+        print(f"## {rel(root, context)}")
+        print("")
+        print(clip(context.read_text(encoding="utf-8"), args.context_chars).rstrip())
+        print("")
+    else:
+        print(f"## {HISTORY_DIR}/CONTEXT.md")
+        print("")
+        print("- missing")
+        print("")
+
+    latest_daily = latest_history_file(root, "daily")
+    if latest_daily:
+        print(f"## Latest Daily: {rel(root, latest_daily)}")
+        print("")
+        print(clip(latest_daily.read_text(encoding="utf-8"), args.daily_chars).rstrip())
+        print("")
+
+    print("## Recent Records")
+    print("")
+    count = 0
+    for path in iter_history_files(root):
+        if path.name in {"CONTEXT.md", "INDEX.md", "README.md"} or "/daily/" in path.as_posix():
+            continue
+        print(f"- `{rel(root, path)}` - {first_heading(path)}")
+        count += 1
+        if count >= args.limit:
+            break
+    if count == 0:
+        print("- none")
+    print("")
+
+    print("## Latest Handoffs / Capsules")
+    print("")
+    handoff_paths = latest_handoff_paths(root, min(args.limit, 3))
+    if not handoff_paths:
+        print("- none")
+    for path in handoff_paths:
+        print(f"- `{rel(root, path)}` - {first_heading(path)}")
+        brief = record_brief(path)
+        if brief and brief != "-":
+            print(f"  {brief}")
+    print("")
+
+    if args.query:
+        print(f"## BM25 Recall: {args.query}")
+        print("")
+        payload = bm25_search(root, args.query, args.limit)
+        print_bm25_payload(payload, show_variants=not args.no_variants)
+
+
+def cmd_finish(args: argparse.Namespace) -> None:
+    root = detect_root(args.root)
+    print(f"# Finish Check ({root})")
+    print("")
+    print("## Git Status")
+    print("")
+    status = git_status(root, untracked_all=True)
+    print("```text")
+    print(status)
+    print("```")
+    print("")
+
+    errors, warnings = lint_history(root, args.max_chars, ensure=False)
+    lines = ["## History Lint", ""]
+    lines.extend(format_lint_section("Errors", errors))
+    lines.extend(format_lint_section("Warnings", warnings))
+    lines.append(f"Summary: errors={len(errors)} warnings={len(warnings)}")
+    print("\n".join(lines))
+    print("")
+
+    changed_paths = [status_path(line) for line in status_lines(root, status)]
+    non_history_changes = [
+        path for path in changed_paths if path and not path.startswith(f"{HISTORY_DIR}/")
+    ]
+    has_history_record_change = any(is_history_record_path(path) for path in changed_paths)
+
+    print("## Recording Guidance")
+    print("")
+    if non_history_changes and not has_history_record_change:
+        print("- Non-history files changed, but no history record change is visible in git status.")
+        print("- If this was non-trivial research, code, experiment, architecture, or collaboration work, create a `change`, `decision`, `idea`, `experiment`, `handoff`, or `handoff-agent-capsule` record before final response.")
+        preview = ", ".join(non_history_changes[:8])
+        print(f"- Changed non-history paths: {preview}")
+    else:
+        print("- no obvious missing history record from git status")
+
+    if errors or (args.strict and warnings):
+        raise SystemExit(1)
 
 
 def cmd_recall(args: argparse.Namespace) -> None:
@@ -3039,6 +3204,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--today", action="store_true", help="Also create today's daily log.")
     p.set_defaults(func=cmd_bootstrap)
 
+    p = sub.add_parser("start", help="Print read-only startup context for a new agent/session.")
+    p.add_argument("--query")
+    p.add_argument("--limit", type=int, default=8)
+    p.add_argument("--context-chars", type=int, default=2800)
+    p.add_argument("--daily-chars", type=int, default=1800)
+    p.add_argument("--no-variants", action="store_true", help="Hide generated query variants in BM25 recall.")
+    p.set_defaults(func=cmd_start)
+
     p = sub.add_parser("today", help="Create or print today's daily log path.")
     p.set_defaults(func=cmd_today)
 
@@ -3175,6 +3348,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--strict", action="store_true", help="Treat warnings as failures.")
     p.set_defaults(func=cmd_lint)
+
+    p = sub.add_parser("finish", help="Run final history checks and recording guidance without creating records.")
+    p.add_argument(
+        "--max-chars",
+        type=int,
+        default=OBSIDIAN_LINT_MAX_CHARS,
+        help=f"Warn when a note exceeds this size. Defaults to {OBSIDIAN_LINT_MAX_CHARS}.",
+    )
+    p.add_argument("--strict", action="store_true", help="Treat lint warnings as failures.")
+    p.set_defaults(func=cmd_finish)
 
     p = sub.add_parser("recall", help="Print context, latest daily log, recent records, and optional query hits.")
     p.add_argument("--query")

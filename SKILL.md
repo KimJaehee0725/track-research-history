@@ -15,6 +15,20 @@ Treat history as part of the work product. For any non-trivial research, code, e
 
 Do not record secrets, credentials, private tokens, or raw personal data. Redact sensitive values and note that they were redacted.
 
+## Trigger Points
+
+Use these trigger points to decide when this skill should act:
+
+| Trigger | Action |
+| --- | --- |
+| New agent/session opens | Run `start` with task-specific query terms. This is read-only and must not create daily logs, records, or index updates. |
+| Substantial work begins | Recall relevant history before editing. If `history/` is missing, run `bootstrap`; otherwise prefer `start --query "<task terms>"`. |
+| Broad task begins | Create a `session` record only when the work is broad enough that a later collaborator would need a session-level summary. |
+| Meaningful change or finding appears | Record the narrowest useful type: `change`, `decision`, `idea`, or `experiment`. Skip trivial chat, one-line answers, and read-only checks. |
+| Agent, tool, thread, host, or server handoff is needed | Create a `handoff-agent-capsule`; use a plain `handoff` for lighter collaborator transfer notes. |
+| Large collaboration context is used | Start from `collab recall`; participants use `collab submit-summary`, and maintainers use `collab promote`, `collab archive`, and `collab status`. |
+| Before final response for non-trivial work | Run `finish`, resolve lint errors, and create any missing history record manually. `finish` does not auto-create records. |
+
 ## Language
 
 Write record prose in the user's working language by default. If the user is working in Korean, write summaries, rationale, validation notes, risks, and handoff context in Korean unless they ask for another language or the target artifact requires English.
@@ -62,9 +76,11 @@ Use the bundled script for deterministic structure, filenames, indexing, and SQL
 
 ```bash
 python3 <skill-dir>/scripts/history.py bootstrap
+python3 <skill-dir>/scripts/history.py start --query "reward shaping" --limit 8
 python3 <skill-dir>/scripts/history.py recall --limit 8
 python3 <skill-dir>/scripts/history.py recall --query "reward shaping" --limit 8
 python3 <skill-dir>/scripts/history.py search "gain_normalized ablation idea" --limit 10
+python3 <skill-dir>/scripts/history.py finish
 ```
 
 Resolve `<skill-dir>` to the directory containing this `SKILL.md`.
@@ -89,7 +105,7 @@ python3 <skill-dir>/scripts/history.py lint --strict
 Before making substantial changes:
 
 1. Run `bootstrap` if `history/` is missing.
-2. Run `recall`; add `--query` terms from the user request, changed subsystem, paper section, method name, dataset, or experiment.
+2. Run `start`; add `--query` terms from the user request, changed subsystem, paper section, method name, dataset, or experiment.
 3. Inspect the generated query variants, BM25 ranked results, and reflection notes.
 4. Read `history/CONTEXT.md`, the latest daily log, and any recall hits that affect the task.
 5. If the task has broad scope, create a session note:
@@ -242,9 +258,11 @@ For non-trivial work, ensure the history reflects what actually happened:
 1. Create or update a `change`, `decision`, `idea`, `experiment`, `handoff`, or `handoff-agent-capsule` record.
 2. Include concrete paths, commands, parameters, validation results, and unresolved risks.
 3. Update `history/CONTEXT.md` only when durable project state changed.
-4. Run:
+4. Run `finish`; fix lint errors and treat missing-record guidance as a prompt to create the right record manually.
+5. Rebuild the index after creating records or changing history files:
 
 ```bash
+python3 <skill-dir>/scripts/history.py finish
 python3 <skill-dir>/scripts/history.py lint
 python3 <skill-dir>/scripts/history.py index
 ```
@@ -256,6 +274,7 @@ Mention the history record path in the final response when useful.
 Use history as a selective memory, not a prompt dump:
 
 - Prefer `recall --query "<specific subsystem or idea>"` over loading every file.
+- Use `start --query "<specific subsystem or idea>"` at new-session startup when you need read-only context. `recall` is still available for compatibility, but it may create today's daily log and rebuild `INDEX.md`.
 - BM25 search runs over virtual markdown-aware chunks: small files stay whole, while longer records split by `##` section and paragraph-sized chunks with overlap. Read the reported chunk heading and line number before opening the full file.
 - Use `search "<query>"` for SQLite FTS5 BM25-ranked retrieval; use `search --exact "<string>"` or `exact "<string>"` only when you need literal substring matches.
 - Treat generated query variants as proposed search angles. If a variant is off-target, rerun with a more specific query.

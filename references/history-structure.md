@@ -75,6 +75,7 @@ python3 <skill-dir>/scripts/history.py lint --max-chars 16000
 Search uses SQLite FTS5's built-in `bm25()` ranking through Python's standard-library `sqlite3` module by default. Start broad, inspect generated variants and reflection, then narrow:
 
 ```bash
+python3 <skill-dir>/scripts/history.py start --query "normalization" --limit 8
 python3 <skill-dir>/scripts/history.py recall --limit 8
 python3 <skill-dir>/scripts/history.py recall --query "normalization" --limit 10
 python3 <skill-dir>/scripts/history.py search "gain_normalized" --limit 20
@@ -82,6 +83,8 @@ python3 <skill-dir>/scripts/history.py exact "gain_normalized" --limit 20
 ```
 
 Use exact field names, file names, method names, experiment ids, figure names, or paper-section names as queries.
+
+Use `start` as the new-session trigger because it is read-only: it prints project context, latest daily notes, recent records, recent handoffs/capsules, and optional BM25 results without creating a daily file or rebuilding `INDEX.md`. Use `recall` when the existing mutating behavior is acceptable or when compatibility with older workflows matters.
 
 BM25 indexing uses virtual chunks rather than treating every file as one large search document. Files up to 2600 characters stay as one chunk. Longer records are split by markdown `##` sections first, then by paragraph groups, with a 2200-character target and about 250 characters of overlap. Each chunk carries the file metadata prefix so task, workstream, approval, and provenance context stay visible. Search output reports the source file, chunk number, heading, line start, approval, and archive status.
 
@@ -141,6 +144,17 @@ When multiple agents or collaborators may touch the repo:
 - Log shared-file edits as `change` records.
 - Put durable choices in `decisions/`, not only in daily logs.
 - Do not overwrite another person's unresolved note; append a dated correction or response.
+
+## Finish Checks
+
+Run `finish` before the final response for non-trivial work:
+
+```bash
+python3 <skill-dir>/scripts/history.py finish
+python3 <skill-dir>/scripts/history.py finish --strict
+```
+
+`finish` prints git status, runs history lint without creating records, and warns when non-history files changed but no visible history record changed. It does not infer or create the record automatically; create the narrowest useful `change`, `decision`, `idea`, `experiment`, `handoff`, or `handoff-agent-capsule` yourself.
 
 ## Handoff Agent Capsule Shape
 

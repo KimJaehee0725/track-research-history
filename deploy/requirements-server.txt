@@ -1,0 +1,4 @@
+# Runtime requirements for the loopback management UI only.
+# The MemoryStore core itself intentionally uses the Python standard library.
+fastapi>=0.115,<1
+uvicorn>=0.30,<1

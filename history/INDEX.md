@@ -1,6 +1,6 @@
 # History Index
 
-Generated: 2026-07-03 17:09 +0900
+Generated: 2026-07-21 20:34 +0900
 
 ## Current Context
 
@@ -11,6 +11,7 @@ Generated: 2026-07-03 17:09 +0900
 
 ### daily
 
+- `history/daily/2026-07-21.md` - Daily Log - 2026-07-21
 - `history/daily/2026-07-03.md` - Daily Log - 2026-07-03
 - `history/daily/2026-05-19.md` - Daily Log - 2026-05-19
 - `history/daily/2026-05-09.md` - Daily Log - 2026-05-09
@@ -18,6 +19,7 @@ Generated: 2026-07-03 17:09 +0900
 
 ### changes
 
+- `history/changes/2026-07-21-203225-ssh-ui.md` - Change - SSH 중앙 메모리 서버와 관리 UI 추가
 - `history/changes/2026-07-03-170930-add-private-git-hub-sync-commands.md` - Change - Add private Git hub sync commands
 - `history/changes/2026-05-19-155420-add-trigger-policy-start-and-finish-commands.md` - Change - Add trigger policy start and finish commands
 - `history/changes/2026-05-09-030730-obsidian-viewer-frontmatter-history-lint.md` - Change - Obsidian viewer용 frontmatter와 history lint 추가
@@ -30,6 +32,7 @@ Generated: 2026-07-03 17:09 +0900
 
 ### decisions
 
+- `history/decisions/0002-ssh.md` - Decision 0002 - 개인 SSH 메모리 서버를 실시간 원본으로 채택
 - `history/decisions/0001-obsidian-viewer-editor-git-history-source-of-truth.md` - Decision 0001 - Obsidian은 viewer/editor로만 사용하고 Git history를 source of truth로 유지
 
 ### ideas

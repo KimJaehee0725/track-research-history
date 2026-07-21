@@ -1,0 +1,14 @@
+# Example entries for /home/memory-rpc/.ssh/authorized_keys.
+#
+# Replace the placeholder public keys.  The policy arguments are server-owned:
+# a client cannot expand its project scope or write permission through stdin or
+# SSH_ORIGINAL_COMMAND.  `restrict` disables forwarding, ptys, X11, agent
+# forwarding, and user rc processing for this key.
+#
+# Use a separate normal SSH account/key for an administrator who needs a UI
+# tunnel: ssh -N -L 8787:127.0.0.1:8787 admin@memory-host
+# Do NOT use these RPC keys for the tunnel; the sshd Match block forbids it.
+
+restrict,command="/opt/research-memory/.venv/bin/python /opt/research-memory/server/rpc.py --data-dir /srv/research-memory --allow-project alienlm --permission write --actor laptop-alienlm-rw" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIreplace-with-project-write-key research-memory-alienlm-rw
+
+restrict,command="/opt/research-memory/.venv/bin/python /opt/research-memory/server/rpc.py --data-dir /srv/research-memory --allow-project alienlm --permission read --actor laptop-alienlm-ro" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIreplace-with-project-read-key research-memory-alienlm-ro

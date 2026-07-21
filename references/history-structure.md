@@ -175,6 +175,38 @@ Failure behavior:
 - lint errors stop submission; `--strict` also treats lint warnings as blockers.
 - use SSH deploy keys or a credential helper; do not put PATs or tokens in remote URLs.
 
+## Central SSH Memory Server
+
+When a personal Linux desktop is the live memory host, it owns the current
+project vaults rather than each client keeping a writable clone. Its data root
+is separate from this source repository:
+
+```text
+/srv/research-memory/
+  projects/<project>/vault/  # canonical human-readable Markdown
+  projects/<project>/.git/  # optional local snapshot history
+  projects/<project>/project.yaml
+  registry.sqlite3           # revision and FTS5 metadata
+  audit/YYYY-MM-DD.jsonl     # actor-attributed mutation audit
+  trash/<trash-id>/          # recoverable notes and projects
+  backups/                   # staging only; use a separate private backup target
+```
+
+`client/memctl.py` is the agent/client write path over a restricted SSH forced
+command. It accepts safe project-relative `.md` paths, sends one JSON request,
+and receives one JSON response. Project keys must be separated by device,
+project, and read/write scope; the server-side `authorized_keys` command fixes
+that scope and its audit actor. `client/memory-run` mounts a selected key
+read-only into a disposable Docker container instead of embedding it in an
+image.
+
+The FastAPI administration UI is a human-only control plane for project/note
+creation, revision-aware editing, trash, and restore. Bind it only to
+`127.0.0.1:8787` and use an SSH local-forward. Do not use the RPC key for this
+tunnel. Obsidian/SSHFS/SFTP may inspect the same vault Markdown; direct edits
+are reindexed on the next server operation, but deletion must always go through
+the UI or `memctl` so trash and audit data are preserved.
+
 ## Vendored Retrieval
 
 The BM25 engine is SQLite FTS5's built-in `bm25()` auxiliary function, accessed through Python's standard-library `sqlite3` module. This avoids vendored Python search packages while keeping local lexical search fast enough for repository-scale history.

@@ -1,3 +1,18 @@
 __pycache__/
 *.py[cod]
 .DS_Store
+.venv/
+venv/
+
+# Runtime state and secrets for the self-hosted memory server.
+/data/
+/var/
+/research-memory-data/
+*.sqlite3
+*.sqlite3-*
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+client.json

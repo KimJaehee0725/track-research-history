@@ -118,6 +118,49 @@ python3 <skill-dir>/scripts/history.py hub submit
 
 Prefer SSH deploy keys or a credential helper. Do not put personal access tokens in remote URLs. Do not store secrets, credentials, raw transcripts, private notes, or personal data in history records just because the GitHub repo is private.
 
+## Central SSH Memory Server
+
+Use the central memory server when a personal Linux desktop is available over
+SSH and every new container must immediately read and write the same project
+memory. In this mode the desktop server owns the canonical Markdown vault,
+search index, revisions, audit log, and recoverable trash. The private Git hub
+is a backup/mirror, not the live write path.
+
+Keep each project isolated under the server data root. A client key must be
+limited to its permitted project(s) and to read or write access; it must not be
+a general shell key. Do not copy a private key into an image, a repository, or
+a note. Mount it read-only only for the life of the container.
+
+Use the dependency-free client after the server administrator has installed a
+restricted `memory-rpc` SSH forced command:
+
+```bash
+python3 client/memctl.py --host memory-host --identity ~/.ssh/memory-alienlm \
+  project list
+python3 client/memctl.py --host memory-host --identity ~/.ssh/memory-alienlm \
+  note search alienlm "tokenizer recovery" --limit 8
+```
+
+For disposable Docker jobs, use the wrapper instead of manually copying
+credentials:
+
+```bash
+client/memory-run --project alienlm --host memory-host \
+  --identity ~/.ssh/memory-alienlm -- IMAGE COMMAND
+```
+
+The administration UI is intentionally loopback-only. Reach it through an SSH
+tunnel, then open `http://127.0.0.1:8787` locally:
+
+```bash
+ssh -N -L 8787:127.0.0.1:8787 researcher@memory-host
+```
+
+Deletion must move a note or project to server-side trash first. A project
+delete requires an exact project-ID confirmation and should be audited. Use
+the UI or server-admin policy to restore or permanently purge material only
+after the stated retention period.
+
 ## Obsidian Viewer Mode
 
 Treat Obsidian as a human viewer/editor over the same Git-tracked markdown files, not as a replacement storage system. The durable source of truth remains repository-local `history/`, Git review, and the CLI recall/index commands.

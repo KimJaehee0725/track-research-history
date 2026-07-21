@@ -1,0 +1,12 @@
+{
+  "host": "research-memory.example.edu",
+  "user": "memory-rpc",
+  "port": 22,
+  "identity_file": "/replace/with/your/.ssh/research-memory-alienlm",
+  "known_hosts": "/replace/with/your/.ssh/known_hosts",
+  "ssh_options": [
+    "IdentitiesOnly=yes",
+    "StrictHostKeyChecking=yes"
+  ],
+  "timeout": 30
+}

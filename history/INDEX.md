@@ -1,6 +1,6 @@
 # History Index
 
-Generated: 2026-05-19 15:54 +0900
+Generated: 2026-07-03 17:09 +0900
 
 ## Current Context
 
@@ -11,12 +11,14 @@ Generated: 2026-05-19 15:54 +0900
 
 ### daily
 
+- `history/daily/2026-07-03.md` - Daily Log - 2026-07-03
 - `history/daily/2026-05-19.md` - Daily Log - 2026-05-19
 - `history/daily/2026-05-09.md` - Daily Log - 2026-05-09
 - `history/daily/2026-05-08.md` - Daily Log - 2026-05-08
 
 ### changes
 
+- `history/changes/2026-07-03-170930-add-private-git-hub-sync-commands.md` - Change - Add private Git hub sync commands
 - `history/changes/2026-05-19-155420-add-trigger-policy-start-and-finish-commands.md` - Change - Add trigger policy start and finish commands
 - `history/changes/2026-05-09-030730-obsidian-viewer-frontmatter-history-lint.md` - Change - Obsidian viewer용 frontmatter와 history lint 추가
 - `history/changes/2026-05-09-025513-bm25-backend-sqlite-fts5-obsidian.md` - Change - BM25 backend을 SQLite FTS5로 교체하고 Obsidian 전환 메모 추가
@@ -32,6 +34,7 @@ Generated: 2026-05-19 15:54 +0900
 
 ### ideas
 
+- `history/ideas/0002-paper-recall.md` - Idea 0002 - Paper Recall식 연구 위키 회수 레이어와 로컬 서버
 - `history/ideas/0001-obsidian-llm-wiki.md` - Idea 0001 - Obsidian 기반 LLM-Wiki 전환 검토
 
 ### experiments
@@ -51,6 +54,10 @@ Generated: 2026-05-19 15:54 +0900
 - none
 
 ## Collaboration
+
+- none
+
+## Hub Projects
 
 - none
 

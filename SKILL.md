@@ -1,6 +1,6 @@
 ---
 name: track-research-history
-description: Maintain durable research-project history while coding, with dependency-light SQLite FTS5 BM25 recall, generated query variants, retrieval reflection, handoff agent capsules, and maintainer-curated collaboration history for large benchmark projects. Use when Codex or Claude needs to automatically record and recall why code changed, how it was implemented, which files changed, which ideas or hypotheses led to it, experiment decisions, collaboration handoffs, agent transition context, task/workstream context, or canonical project context in a repository-level history/ folder or central history repo.
+description: Maintain durable research-project history while coding, with dependency-light SQLite FTS5 BM25 recall, generated query variants, retrieval reflection, handoff agent capsules, maintainer-curated collaboration history, and private-Git hub sync for cross-server/project recall. Use when Codex or Claude needs to automatically record, submit, and recall why code changed, how it was implemented, which files changed, which ideas or hypotheses led to it, experiment decisions, collaboration handoffs, agent transition context, task/workstream context, canonical project context, or shared research history in a repository-level history/ folder, central history repo, or GitHub private hub.
 ---
 
 # Track Research History
@@ -27,6 +27,7 @@ Use these trigger points to decide when this skill should act:
 | Meaningful change or finding appears | Record the narrowest useful type: `change`, `decision`, `idea`, or `experiment`. Skip trivial chat, one-line answers, and read-only checks. |
 | Agent, tool, thread, host, or server handoff is needed | Create a `handoff-agent-capsule`; use a plain `handoff` for lighter collaborator transfer notes. |
 | Large collaboration context is used | Start from `collab recall`; participants use `collab submit-summary`, and maintainers use `collab promote`, `collab archive`, and `collab status`. |
+| `history/hub.json` exists or `HISTORY_HUB_REMOTE` is set | Run `hub sync` or `hub recall` at start when cross-project context may matter; run `hub submit` after recording local history. |
 | Before final response for non-trivial work | Run `finish`, resolve lint errors, and create any missing history record manually. `finish` does not auto-create records. |
 
 ## Language
@@ -81,9 +82,41 @@ python3 <skill-dir>/scripts/history.py recall --limit 8
 python3 <skill-dir>/scripts/history.py recall --query "reward shaping" --limit 8
 python3 <skill-dir>/scripts/history.py search "gain_normalized ablation idea" --limit 10
 python3 <skill-dir>/scripts/history.py finish
+python3 <skill-dir>/scripts/history.py hub status
+python3 <skill-dir>/scripts/history.py hub submit
 ```
 
 Resolve `<skill-dir>` to the directory containing this `SKILL.md`.
+
+## Private Git Hub Sync
+
+Use `hub` when multiple servers, repos, or agents should share history through a private GitHub repository. The hub is a Git transport and mirror, not a database. The source of truth remains markdown under `history/` plus Git commits.
+
+Setup on each project:
+
+```bash
+python3 <skill-dir>/scripts/history.py hub client-init \
+  --project operationbench \
+  --remote git@github.com:OWNER/research-history-hub.git
+```
+
+Startup with hub context:
+
+```bash
+python3 <skill-dir>/scripts/history.py hub sync
+python3 <skill-dir>/scripts/history.py hub recall "reward model eval" --limit 8
+python3 <skill-dir>/scripts/history.py start --query "reward model eval" --limit 8
+```
+
+Before final response, after local records are created and `finish` is clean enough for the task:
+
+```bash
+python3 <skill-dir>/scripts/history.py hub submit
+```
+
+`hub submit` copies this repo's markdown history into the local hub clone under `history/projects/<project>/`, rebuilds the hub index, commits only `history/`, and pushes the configured branch. If clone, auth, network, or push fails, it writes a retry marker under `history/outbox/hub/` in the source project.
+
+Prefer SSH deploy keys or a credential helper. Do not put personal access tokens in remote URLs. Do not store secrets, credentials, raw transcripts, private notes, or personal data in history records just because the GitHub repo is private.
 
 ## Obsidian Viewer Mode
 

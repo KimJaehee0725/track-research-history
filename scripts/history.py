@@ -2,7 +2,11 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
+import os
 import re
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -12,6 +16,9 @@ from pathlib import Path
 
 
 HISTORY_DIR = "history"
+HUB_CONFIG_NAME = "hub.json"
+HUB_CONFIG_VERSION = 1
+HUB_DEFAULT_BRANCH = "main"
 SCRIPT_DIR = Path(__file__).resolve().parent
 TOKEN_PATTERN = r"(?u)\b[\w./:-]{2,}\b"
 CHUNK_TARGET_CHARS = 2200
@@ -32,6 +39,7 @@ RECORD_DIRS = [
 DEFAULT_COLLAB_WORKSTREAMS = ["data", "eval", "model", "writeup"]
 COLLAB_DIRS = ["canonical", "tasks", "inbox", "archive"]
 ARCHIVE_TYPES = ["inbox", "daily", "sessions"]
+HUB_COPY_EXCLUDE_TOP = {"templates", "outbox"}
 SECRET_PATTERNS = [
     (re.compile(r"(?i)\b(password|passwd|pwd)\b\s*[:=]"), "password-like field"),
     (re.compile(r"(?i)\b(api[_-]?key|secret|token|credential)\b\s*[:=]"), "secret-like field"),
@@ -1026,6 +1034,353 @@ def git_status(root: Path, untracked_all: bool = False) -> str:
         return f"unavailable: {exc}"
 
 
+def git_run(root: Path, args: list[str], check: bool = True) -> subprocess.CompletedProcess[str]:
+    proc = subprocess.run(
+        ["git", "-C", str(root), *args],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if check and proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip()
+        raise SystemExit(f"git {' '.join(args)} failed in {root}: {detail}")
+    return proc
+
+
+def git_config_get(root: Path, key: str) -> str:
+    proc = git_run(root, ["config", "--get", key], check=False)
+    return proc.stdout.strip() if proc.returncode == 0 else ""
+
+
+def git_current_branch(root: Path) -> str:
+    proc = git_run(root, ["branch", "--show-current"], check=False)
+    return proc.stdout.strip() if proc.returncode == 0 else ""
+
+
+def git_current_commit(root: Path) -> str:
+    proc = git_run(root, ["rev-parse", "--short", "HEAD"], check=False)
+    return proc.stdout.strip() if proc.returncode == 0 else ""
+
+
+def git_has_changes(root: Path) -> bool:
+    proc = git_run(root, ["status", "--porcelain"], check=False)
+    return bool(proc.stdout.strip()) if proc.returncode == 0 else False
+
+
+def ensure_git_repo(root: Path, branch: str = HUB_DEFAULT_BRANCH) -> None:
+    root.mkdir(parents=True, exist_ok=True)
+    if git_run(root, ["rev-parse", "--is-inside-work-tree"], check=False).returncode != 0:
+        subprocess.run(["git", "init"], cwd=str(root), check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if not git_current_branch(root):
+        git_run(root, ["checkout", "-B", branch], check=False)
+
+
+def ensure_git_identity(root: Path) -> None:
+    if not git_config_get(root, "user.name"):
+        git_run(root, ["config", "user.name", "track-research-history"])
+    if not git_config_get(root, "user.email"):
+        git_run(root, ["config", "user.email", "track-research-history@example.local"])
+
+
+def git_remote_url(root: Path) -> str:
+    return git_config_get(root, "remote.origin.url")
+
+
+def set_origin_remote(root: Path, remote: str) -> None:
+    if not remote:
+        return
+    current = git_remote_url(root)
+    if current:
+        if current != remote:
+            git_run(root, ["remote", "set-url", "origin", remote])
+    else:
+        git_run(root, ["remote", "add", "origin", remote])
+
+
+def git_commit_all(root: Path, message: str) -> bool:
+    ensure_git_identity(root)
+    git_run(root, ["add", "history"])
+    staged = git_run(root, ["diff", "--cached", "--quiet"], check=False)
+    if staged.returncode == 0:
+        return False
+    git_run(root, ["commit", "-m", message])
+    return True
+
+
+def git_pull_rebase(root: Path, branch: str) -> None:
+    if not git_remote_url(root):
+        return
+    fetch = git_run(root, ["fetch", "origin", branch], check=False)
+    if fetch.returncode != 0:
+        return
+    if git_run(root, ["rev-parse", "--verify", f"origin/{branch}"], check=False).returncode == 0:
+        git_run(root, ["checkout", "-B", branch])
+        git_run(root, ["pull", "--rebase", "origin", branch])
+
+
+def git_push(root: Path, branch: str) -> subprocess.CompletedProcess[str]:
+    if not git_remote_url(root):
+        return subprocess.CompletedProcess(["git", "push"], 0, "", "")
+    return git_run(root, ["push", "-u", "origin", branch], check=False)
+
+
+def remote_slug(remote: str) -> str:
+    cleaned = remote.strip()
+    cleaned = re.sub(r"\.git$", "", cleaned)
+    if ":" in cleaned and "/" in cleaned and "://" not in cleaned:
+        cleaned = cleaned.split(":", 1)[1]
+    cleaned = cleaned.rstrip("/")
+    parts = [part for part in cleaned.split("/") if part]
+    if len(parts) >= 2:
+        return slugify("-".join(parts[-2:]), "history-hub")
+    return slugify(cleaned or "history-hub", "history-hub")
+
+
+def default_project_id(root: Path) -> str:
+    remote = git_remote_url(root)
+    if remote:
+        return remote_slug(remote)
+    return slugify(root.name, "project")
+
+
+def default_hub_path(remote: str | None) -> Path:
+    basis = remote or "local-history-hub"
+    digest = hashlib.sha1(basis.encode("utf-8")).hexdigest()[:12]
+    name = f"{remote_slug(basis)}-{digest}"
+    configured = os.environ.get("HISTORY_HUB_PATH")
+    if configured:
+        return Path(configured).expanduser().resolve()
+    return (Path.home() / ".cache" / "track-research-history" / "hubs" / name).resolve()
+
+
+def hub_config_path(root: Path) -> Path:
+    return root / HISTORY_DIR / HUB_CONFIG_NAME
+
+
+def hub_remote_warnings(remote: str | None) -> list[str]:
+    if not remote:
+        return []
+    warnings = detect_sensitive_warnings([("hub remote", remote)])
+    if re.search(r"https?://[^/\s]+@", remote):
+        warnings.append("hub remote: URL appears to include inline credentials; use SSH deploy keys or a credential helper instead.")
+    return sorted(set(warnings))
+
+
+def load_hub_config(root: Path, require: bool = True) -> dict[str, object]:
+    path = hub_config_path(root)
+    config: dict[str, object] = {}
+    if path.exists():
+        try:
+            config = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise SystemExit(f"Invalid hub config JSON at {rel(root, path)}: {exc}") from exc
+    else:
+        env_remote = os.environ.get("HISTORY_HUB_REMOTE")
+        if env_remote:
+            config = {
+                "version": HUB_CONFIG_VERSION,
+                "project": os.environ.get("HISTORY_HUB_PROJECT") or default_project_id(root),
+                "remote": env_remote,
+                "branch": os.environ.get("HISTORY_HUB_BRANCH") or HUB_DEFAULT_BRANCH,
+                "hub_path": str(default_hub_path(env_remote)),
+                "auto_submit": True,
+            }
+    if not config and require:
+        raise SystemExit(
+            f"No hub config found. Run `history.py hub client-init --remote <private-github-repo-url>` first."
+        )
+    if config:
+        remote = str(config.get("remote") or "")
+        config.setdefault("version", HUB_CONFIG_VERSION)
+        config.setdefault("project", default_project_id(root))
+        config.setdefault("branch", HUB_DEFAULT_BRANCH)
+        config.setdefault("hub_path", str(default_hub_path(remote)))
+        config.setdefault("auto_submit", True)
+    return config
+
+
+def write_hub_config(root: Path, config: dict[str, object]) -> Path:
+    ensure_history(root)
+    path = hub_config_path(root)
+    path.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return path
+
+
+def ensure_hub_root(hub_root: Path) -> None:
+    ensure_history(hub_root)
+    projects = hub_root / HISTORY_DIR / "projects"
+    projects.mkdir(parents=True, exist_ok=True)
+    write_if_missing(
+        projects / "README.md",
+        """# Hub Projects
+
+This folder stores project history mirrors submitted from configured research repositories.
+
+Each project folder is copied from one repository's `history/` folder. The private Git remote remains the durable transport and review trail.
+""",
+    )
+
+
+def prepare_hub_workspace(config: dict[str, object], pull: bool = True) -> Path:
+    remote = str(config.get("remote") or "")
+    branch = str(config.get("branch") or HUB_DEFAULT_BRANCH)
+    hub_root = Path(str(config.get("hub_path") or default_hub_path(remote))).expanduser().resolve()
+    if not hub_root.exists() and remote:
+        hub_root.parent.mkdir(parents=True, exist_ok=True)
+        clone = subprocess.run(
+            ["git", "clone", remote, str(hub_root)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        if clone.returncode != 0:
+            raise SystemExit(f"git clone failed for hub remote {remote}: {(clone.stderr or clone.stdout).strip()}")
+    ensure_git_repo(hub_root, branch)
+    if remote:
+        set_origin_remote(hub_root, remote)
+    if pull:
+        git_pull_rebase(hub_root, branch)
+    ensure_hub_root(hub_root)
+    return hub_root
+
+
+def project_history_files(root: Path, include_archive: bool = False) -> list[Path]:
+    history = root / HISTORY_DIR
+    if not history.exists():
+        return []
+    files: list[Path] = []
+    for path in sorted(history.rglob("*.md")):
+        relative = path.relative_to(history)
+        if relative.name == "INDEX.md":
+            continue
+        if not relative.parts:
+            continue
+        if relative.parts[0] in HUB_COPY_EXCLUDE_TOP:
+            continue
+        if relative.parts[0] == "archive" and not include_archive:
+            continue
+        if "templates" in relative.parts:
+            continue
+        files.append(path)
+    return files
+
+
+def copy_if_changed(source: Path, destination: Path) -> bool:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.exists() and destination.read_bytes() == source.read_bytes():
+        return False
+    shutil.copy2(source, destination)
+    return True
+
+
+def project_manifest_text(root: Path, project: str, config: dict[str, object]) -> str:
+    remote = git_remote_url(root)
+    branch = git_current_branch(root)
+    commit = git_current_commit(root)
+    status = git_status(root, untracked_all=True)
+    lines = [
+        f"# Hub Project - {project}",
+        "",
+        f"Project: {project}",
+        f"Source Repo: {remote or '-'}",
+        f"Source Branch: {branch or '-'}",
+        f"Source Commit: {commit or '-'}",
+        f"Source Root Name: {root.name}",
+        f"Hub Remote: {config.get('remote') or '-'}",
+        "Status: active",
+        "",
+        "## Current Source Git Status",
+        "",
+        "```text",
+        status,
+        "```",
+        "",
+    ]
+    text = "\n".join(lines)
+    return add_obsidian_frontmatter(
+        text,
+        "hub-project",
+        f"Hub Project - {project}",
+        {
+            "project": project,
+            "source_repo": remote or "-",
+            "source_branch": branch or "-",
+            "source_commit": commit or "-",
+            "date": commit or "uncommitted",
+            "status": "active",
+            "tags": ["history", "hub", "project", project],
+        },
+    )
+
+
+def copy_project_history_to_hub(
+    root: Path,
+    hub_root: Path,
+    project: str,
+    config: dict[str, object],
+    include_archive: bool = False,
+) -> list[str]:
+    ensure_history(root)
+    ensure_hub_root(hub_root)
+    project_id = slugify(project, "project")
+    source_history = root / HISTORY_DIR
+    destination_root = hub_root / HISTORY_DIR / "projects" / project_id
+    changed: list[str] = []
+    for source in project_history_files(root, include_archive=include_archive):
+        relative = source.relative_to(source_history)
+        destination = destination_root / relative
+        if copy_if_changed(source, destination):
+            changed.append(rel(hub_root, destination))
+    manifest = destination_root / "PROJECT.md"
+    manifest_text = project_manifest_text(root, project_id, config)
+    if not manifest.exists() or manifest.read_text(encoding="utf-8") != manifest_text:
+        manifest.parent.mkdir(parents=True, exist_ok=True)
+        manifest.write_text(manifest_text, encoding="utf-8")
+        changed.append(rel(hub_root, manifest))
+    return changed
+
+
+def hub_outbox_dir(root: Path) -> Path:
+    return root / HISTORY_DIR / "outbox" / "hub"
+
+
+def write_hub_outbox(root: Path, project: str, reason: str, config: dict[str, object]) -> Path:
+    ensure_history(root)
+    title = f"Hub submit failed - {project}"
+    out = hub_outbox_dir(root) / f"{time_stamp()}-{slugify(project, 'project')}-hub-submit-failed.md"
+    text = "\n".join(
+        [
+            f"# {title}",
+            "",
+            f"Date: {display_time()}",
+            f"Project: {project}",
+            f"Hub Remote: {config.get('remote') or '-'}",
+            f"Hub Path: {config.get('hub_path') or '-'}",
+            "Status: pending-retry",
+            "",
+            "## Failure",
+            "",
+            reason.strip() or "-",
+            "",
+            "## Retry",
+            "",
+            "Run `python3 <skill-dir>/scripts/history.py hub submit` after fixing network, credentials, or remote permissions.",
+            "",
+        ]
+    )
+    text = add_obsidian_frontmatter(
+        text,
+        "hub-outbox",
+        title,
+        {"project": project, "status": "pending-retry", "tags": ["history", "hub", "outbox"]},
+    )
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(text, encoding="utf-8")
+    append_daily(root, "hub-outbox", title, out)
+    build_index(root)
+    return out
+
+
 def write_record(root: Path, folder: str, filename: str, text: str, kind: str, title: str) -> Path:
     ensure_history(root)
     out = root / HISTORY_DIR / folder / filename
@@ -1076,6 +1431,22 @@ def build_index(root: Path) -> Path:
         title = first_heading(path)
         lines.append(f"- `{rel(root, path)}` - {title} (approval={approval_status(path)})")
     lines.append("")
+    project_root = history / "projects"
+    project_dirs = sorted([p for p in project_root.iterdir() if p.is_dir()]) if project_root.exists() else []
+    lines.append("## Hub Projects")
+    lines.append("")
+    if not project_dirs:
+        lines.append("- none")
+    for project_dir in project_dirs:
+        project_files = [p for p in project_dir.rglob("*.md") if "/templates/" not in p.as_posix()]
+        manifest = project_dir / "PROJECT.md"
+        title = first_heading(manifest) if manifest.exists() else project_dir.name
+        lines.append(f"- `{rel(root, project_dir)}` - {title} ({len(project_files)} markdown files)")
+        for path in sorted(project_files, key=lambda p: p.stat().st_mtime, reverse=True)[:6]:
+            if path.name == "PROJECT.md":
+                continue
+            lines.append(f"  - `{rel(root, path)}` - {first_heading(path)}")
+    lines.append("")
     archive = history / "archive"
     archive_files = []
     if archive.exists():
@@ -1123,6 +1494,8 @@ def record_kind(path: Path) -> str:
         if len(parts) > archive_idx + 1:
             return parts[archive_idx + 1]
         return "archive"
+    if path.name == "PROJECT.md" and "projects" in parts:
+        return "hub-project"
     if "canonical" in parts:
         return "canonical"
     if "inbox" in parts:
@@ -1968,20 +2341,22 @@ def iter_search_files(root: Path) -> list[Path]:
         parts = path.parts
         if path.name == "CONTEXT.md" or "canonical" in parts:
             bucket = 0
-        elif "tasks" in parts and "workstreams" not in parts:
+        elif path.name == "PROJECT.md" and "projects" in parts:
             bucket = 1
-        elif "tasks" in parts and "workstreams" in parts:
+        elif "tasks" in parts and "workstreams" not in parts:
             bucket = 2
-        elif parent in {"changes", "decisions", "ideas", "experiments", "handoffs", "capsules", "sessions"}:
+        elif "tasks" in parts and "workstreams" in parts:
             bucket = 3
-        elif parent == "daily":
+        elif parent in {"changes", "decisions", "ideas", "experiments", "handoffs", "capsules", "sessions"}:
             bucket = 4
-        elif path.name in {"INDEX.md", "README.md"}:
+        elif parent == "daily":
             bucket = 5
-        elif "inbox" in parts:
+        elif path.name in {"INDEX.md", "README.md"}:
             bucket = 6
-        else:
+        elif "inbox" in parts:
             bucket = 7
+        else:
+            bucket = 8
         return (bucket, -path.stat().st_mtime)
 
     return sorted(iter_history_files(root), key=rank)
@@ -3191,6 +3566,217 @@ def cmd_collab_status(args: argparse.Namespace) -> None:
     print("")
 
 
+def print_hub_lint(errors: list[str], warnings: list[str]) -> None:
+    if not errors and not warnings:
+        return
+    lines = ["# Hub Submit Lint", ""]
+    lines.extend(format_lint_section("Errors", errors))
+    lines.extend(format_lint_section("Warnings", warnings))
+    print("\n".join(lines), file=sys.stderr)
+
+
+def cmd_hub_init(args: argparse.Namespace) -> None:
+    hub_root = Path(args.repo).expanduser().resolve() if args.repo else detect_root(args.root)
+    branch = args.branch or HUB_DEFAULT_BRANCH
+    remote = args.remote or ""
+    if remote and not hub_root.exists():
+        config = {"remote": remote, "branch": branch, "hub_path": str(hub_root)}
+        hub_root = prepare_hub_workspace(config, pull=True)
+    else:
+        ensure_git_repo(hub_root, branch)
+        if remote:
+            set_origin_remote(hub_root, remote)
+        ensure_hub_root(hub_root)
+    build_index(hub_root)
+    committed = False
+    if not args.no_commit:
+        committed = git_commit_all(hub_root, args.message or "hub: initialize research history hub")
+    pushed = False
+    if args.push:
+        push = git_push(hub_root, branch)
+        if push.returncode != 0:
+            raise SystemExit(f"Hub push failed: {(push.stderr or push.stdout).strip()}")
+        pushed = True
+    print("# Hub Init")
+    print("")
+    print(f"Hub Root: {hub_root}")
+    print(f"History Root: {rel(hub_root, hub_root / HISTORY_DIR)}")
+    print(f"Remote: {remote or git_remote_url(hub_root) or '-'}")
+    print(f"Branch: {branch}")
+    print(f"Committed: {'yes' if committed else 'no'}")
+    print(f"Pushed: {'yes' if pushed else 'no'}")
+
+
+def cmd_hub_client_init(args: argparse.Namespace) -> None:
+    root = detect_root(args.root)
+    ensure_history(root)
+    remote = args.remote or os.environ.get("HISTORY_HUB_REMOTE") or ""
+    if not remote:
+        raise SystemExit("--remote is required unless HISTORY_HUB_REMOTE is set.")
+    warnings = hub_remote_warnings(remote)
+    for warning in warnings:
+        print(f"WARNING: {warning}", file=sys.stderr)
+    if warnings and args.strict:
+        raise SystemExit("Sensitive-looking hub remote detected; use SSH deploy keys or a credential helper.")
+    project = slugify(args.project or os.environ.get("HISTORY_HUB_PROJECT") or default_project_id(root), "project")
+    branch = args.branch or os.environ.get("HISTORY_HUB_BRANCH") or HUB_DEFAULT_BRANCH
+    hub_path = Path(args.hub_path).expanduser().resolve() if args.hub_path else default_hub_path(remote)
+    config = {
+        "version": HUB_CONFIG_VERSION,
+        "project": project,
+        "remote": remote,
+        "branch": branch,
+        "hub_path": str(hub_path),
+        "auto_submit": not args.no_auto_submit,
+        "include_archive": bool(args.include_archive),
+    }
+    path = write_hub_config(root, config)
+    if args.sync:
+        prepare_hub_workspace(config, pull=True)
+    print("# Hub Client Init")
+    print("")
+    print(f"Config: {rel(root, path)}")
+    print(f"Project: {project}")
+    print(f"Remote: {remote}")
+    print(f"Branch: {branch}")
+    print(f"Hub Path: {hub_path}")
+    print(f"Auto Submit: {'yes' if config['auto_submit'] else 'no'}")
+
+
+def cmd_hub_sync(args: argparse.Namespace) -> None:
+    root = detect_root(args.root)
+    config = load_hub_config(root)
+    if args.hub_path:
+        config["hub_path"] = str(Path(args.hub_path).expanduser().resolve())
+    hub_root = prepare_hub_workspace(config, pull=not args.no_pull)
+    index = build_index(hub_root)
+    print("# Hub Sync")
+    print("")
+    print(f"Hub Root: {hub_root}")
+    print(f"Index: {rel(hub_root, index)}")
+    print(f"Remote: {config.get('remote') or git_remote_url(hub_root) or '-'}")
+    print(f"Branch: {config.get('branch') or HUB_DEFAULT_BRANCH}")
+    print("")
+    print("## Hub Git Status")
+    print("")
+    print("```text")
+    print(git_status(hub_root, untracked_all=True))
+    print("```")
+
+
+def cmd_hub_submit(args: argparse.Namespace) -> None:
+    root = detect_root(args.root)
+    errors, warnings = lint_history(root, OBSIDIAN_LINT_MAX_CHARS, ensure=False)
+    if errors or (args.strict and warnings):
+        print_hub_lint(errors, warnings)
+        raise SystemExit("Hub submit stopped because history lint failed.")
+    config = load_hub_config(root)
+    if args.hub_path:
+        config["hub_path"] = str(Path(args.hub_path).expanduser().resolve())
+    if args.project:
+        config["project"] = slugify(args.project, "project")
+    if args.include_archive:
+        config["include_archive"] = True
+    project = str(config.get("project") or default_project_id(root))
+    branch = str(config.get("branch") or HUB_DEFAULT_BRANCH)
+    try:
+        hub_root = prepare_hub_workspace(config, pull=not args.no_pull)
+        changed = copy_project_history_to_hub(
+            root,
+            hub_root,
+            project,
+            config,
+            include_archive=bool(config.get("include_archive")),
+        )
+        index = hub_root / HISTORY_DIR / "INDEX.md"
+        if changed or not index.exists():
+            index = build_index(hub_root)
+        committed = False
+        if changed or git_has_changes(hub_root):
+            committed = git_commit_all(
+                hub_root,
+                args.message or f"hub: sync {project} history",
+            )
+        pushed = False
+        if not args.no_push:
+            push = git_push(hub_root, branch)
+            if push.returncode != 0:
+                detail = (push.stderr or push.stdout or "").strip()
+                outbox = write_hub_outbox(root, project, detail, config)
+                raise SystemExit(f"Hub push failed; retry marker written to {rel(root, outbox)}: {detail}")
+            pushed = True
+    except SystemExit as exc:
+        if "retry marker written" not in str(exc):
+            outbox = write_hub_outbox(root, project, str(exc), config)
+            raise SystemExit(f"Hub submit failed; retry marker written to {rel(root, outbox)}: {exc}") from exc
+        raise
+    print("# Hub Submit")
+    print("")
+    print(f"Project: {project}")
+    print(f"Hub Root: {hub_root}")
+    print(f"Index: {rel(hub_root, index)}")
+    print(f"Changed Files: {len(changed)}")
+    for path in changed[:20]:
+        print(f"- `{path}`")
+    if len(changed) > 20:
+        print(f"- ... {len(changed) - 20} more")
+    print(f"Committed: {'yes' if committed else 'no'}")
+    print(f"Pushed: {'yes' if pushed else 'no'}")
+
+
+def cmd_hub_recall(args: argparse.Namespace) -> None:
+    root = detect_root(args.root)
+    config = load_hub_config(root)
+    if args.hub_path:
+        config["hub_path"] = str(Path(args.hub_path).expanduser().resolve())
+    hub_root = prepare_hub_workspace(config, pull=not args.no_sync)
+    print(f"# Hub Recall ({hub_root})")
+    print("")
+    print(f"Project Filter: {args.project or '-'}")
+    print(f"Query: {args.query}")
+    print("")
+    query = args.query
+    if args.project:
+        query = f"{slugify(args.project, 'project')} {query}"
+    payload = bm25_search(hub_root, query, args.limit)
+    print_bm25_payload(payload, show_variants=not args.no_variants)
+
+
+def cmd_hub_status(args: argparse.Namespace) -> None:
+    root = detect_root(args.root)
+    config = load_hub_config(root, require=False)
+    print("# Hub Status")
+    print("")
+    if not config:
+        print("- no hub config")
+        print("- run `history.py hub client-init --remote <private-github-repo-url>`")
+        return
+    if args.hub_path:
+        config["hub_path"] = str(Path(args.hub_path).expanduser().resolve())
+    hub_root = Path(str(config.get("hub_path"))).expanduser().resolve()
+    if args.sync:
+        hub_root = prepare_hub_workspace(config, pull=True)
+    outbox = list(hub_outbox_dir(root).glob("*.md")) if hub_outbox_dir(root).exists() else []
+    print(f"Config: {rel(root, hub_config_path(root)) if hub_config_path(root).exists() else 'environment'}")
+    print(f"Project: {config.get('project')}")
+    print(f"Remote: {config.get('remote')}")
+    print(f"Branch: {config.get('branch')}")
+    print(f"Hub Path: {hub_root}")
+    print(f"Hub Exists: {'yes' if hub_root.exists() else 'no'}")
+    print(f"Auto Submit: {'yes' if config.get('auto_submit') else 'no'}")
+    print(f"Outbox Pending: {len(outbox)}")
+    if outbox:
+        for path in sorted(outbox, key=lambda p: p.stat().st_mtime, reverse=True)[: args.limit]:
+            print(f"- `{rel(root, path)}` - {first_heading(path)}")
+    if hub_root.exists():
+        print("")
+        print("## Hub Git Status")
+        print("")
+        print("```text")
+        print(git_status(hub_root, untracked_all=True))
+        print("```")
+
+
 def add_root(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--root", help="Repository root. Defaults to git root, then current directory.")
 
@@ -3366,6 +3952,59 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--daily-chars", type=int, default=1800)
     p.add_argument("--no-variants", action="store_true", help="Hide generated query variants in BM25 recall.")
     p.set_defaults(func=cmd_recall)
+
+    p = sub.add_parser("hub", help="Sync project history through a private Git remote hub.")
+    hub_sub = p.add_subparsers(dest="hub_command", required=True)
+
+    hp = hub_sub.add_parser("init", help="Initialize a local research history hub working tree.")
+    hp.add_argument("--repo", help="Hub working tree path. Defaults to --root/current git root.")
+    hp.add_argument("--remote", help="Private GitHub repository URL, preferably SSH.")
+    hp.add_argument("--branch", default=HUB_DEFAULT_BRANCH)
+    hp.add_argument("--message", help="Initial commit message.")
+    hp.add_argument("--no-commit", action="store_true", help="Create files without committing them.")
+    hp.add_argument("--push", action="store_true", help="Push the initialized hub branch.")
+    hp.set_defaults(func=cmd_hub_init)
+
+    hp = hub_sub.add_parser("client-init", help="Configure this project to submit history to a hub remote.")
+    hp.add_argument("--project", help="Stable project id. Defaults to remote-derived repo name or folder name.")
+    hp.add_argument("--remote", help="Private GitHub repository URL, preferably SSH.")
+    hp.add_argument("--branch", default=HUB_DEFAULT_BRANCH)
+    hp.add_argument("--hub-path", help="Local clone/cache path for the hub working tree.")
+    hp.add_argument("--include-archive", action="store_true", help="Submit archived records too.")
+    hp.add_argument("--no-auto-submit", action="store_true", help="Mark config as manual-submit.")
+    hp.add_argument("--sync", action="store_true", help="Clone/pull the hub immediately after writing config.")
+    hp.add_argument("--strict", action="store_true", help="Fail if the remote URL appears to contain secrets.")
+    hp.set_defaults(func=cmd_hub_client_init)
+
+    hp = hub_sub.add_parser("sync", help="Clone or pull the configured hub working tree.")
+    hp.add_argument("--hub-path", help="Override configured local hub path.")
+    hp.add_argument("--no-pull", action="store_true", help="Do not fetch/pull from origin.")
+    hp.set_defaults(func=cmd_hub_sync)
+
+    hp = hub_sub.add_parser("submit", help="Copy this project's history into the hub, commit, and push.")
+    hp.add_argument("--project", help="Override configured project id.")
+    hp.add_argument("--hub-path", help="Override configured local hub path.")
+    hp.add_argument("--message", help="Hub commit message.")
+    hp.add_argument("--include-archive", action="store_true", help="Submit archived records too.")
+    hp.add_argument("--no-pull", action="store_true", help="Do not pull before copying records.")
+    hp.add_argument("--no-push", action="store_true", help="Commit locally but do not push.")
+    hp.add_argument("--strict", action="store_true", help="Treat lint warnings as submit blockers.")
+    hp.set_defaults(func=cmd_hub_submit)
+
+    hp = hub_sub.add_parser("recall", help="Sync the hub and search its project history mirrors.")
+    hp.add_argument("query")
+    hp.add_argument("--project", help="Bias search toward a project id.")
+    hp.add_argument("--hub-path", help="Override configured local hub path.")
+    hp.add_argument("--limit", type=int, default=8)
+    hp.add_argument("--no-sync", action="store_true", help="Do not pull before searching.")
+    hp.add_argument("--no-variants", action="store_true", help="Hide generated query variants.")
+    hp.set_defaults(func=cmd_hub_recall)
+
+    hp = hub_sub.add_parser("status", help="Show hub config, local clone state, and pending outbox markers.")
+    hp.add_argument("--hub-path", help="Override configured local hub path.")
+    hp.add_argument("--sync", action="store_true", help="Pull hub before reporting status.")
+    hp.add_argument("--limit", type=int, default=8)
+    hp.set_defaults(func=cmd_hub_status)
 
     p = sub.add_parser("collab", help="Manage maintainer-curated collaboration history.")
     collab_sub = p.add_subparsers(dest="collab_command", required=True)

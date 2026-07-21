@@ -23,6 +23,9 @@ Use this reference when deciding where to store or find project memory.
 - `history/archive/inbox/YYYY-MM/`: accepted inbox summaries after they have been promoted and archived.
 - `history/archive/daily/YYYY-MM/`: older daily logs moved out of the active daily folder.
 - `history/archive/sessions/YYYY-MM/`: older session notes moved out of the active sessions folder.
+- `history/hub.json`: project-local hub sync config. It stores project id, private Git remote, branch, local hub clone path, and archive inclusion policy. Do not store tokens in this file.
+- `history/outbox/hub/*.md`: retry markers written when hub clone, auth, network, or push fails.
+- Hub repo only: `history/projects/<project>/PROJECT.md` plus mirrored project records such as `changes/`, `decisions/`, `experiments/`, `handoffs/`, `capsules/`, `tasks/`, and `inbox/`.
 
 ## Record Quality
 
@@ -127,6 +130,50 @@ Collaboration records should keep this top metadata when applicable:
 - `Archived Date:`
 
 `collab status` reports pending inbox submissions, accepted-but-unarchived inbox records, archive candidates, stale canonical/task/workstream context, unscoped handoffs/capsules, accepted decisions, and open risks.
+
+## Private Git Hub Workflow
+
+Use `hub` when separate servers or repos need to exchange searchable history through a private GitHub repository. The hub is a Git working tree containing mirrored markdown records; it is not a separate source of truth or database.
+
+Initialize or clone the hub working tree:
+
+```bash
+python3 <skill-dir>/scripts/history.py hub init \
+  --repo ~/Research/research-history-hub \
+  --remote git@github.com:OWNER/research-history-hub.git \
+  --push
+```
+
+Configure each source project once:
+
+```bash
+python3 <skill-dir>/scripts/history.py hub client-init \
+  --project operationbench \
+  --remote git@github.com:OWNER/research-history-hub.git
+```
+
+Use hub context at startup when cross-project memory may matter:
+
+```bash
+python3 <skill-dir>/scripts/history.py hub sync
+python3 <skill-dir>/scripts/history.py hub recall "dataset mismatch eval" --limit 8
+```
+
+Submit after creating local records:
+
+```bash
+python3 <skill-dir>/scripts/history.py finish
+python3 <skill-dir>/scripts/history.py hub submit
+```
+
+`hub submit` runs history lint, copies markdown records from the source repo into `history/projects/<project>/` in the hub clone, writes or updates `PROJECT.md`, rebuilds the hub `INDEX.md`, commits only `history/`, and pushes the configured branch. It excludes `history/templates/`, `history/outbox/`, generated `INDEX.md`, and archives unless `--include-archive` or config `include_archive` is set.
+
+Failure behavior:
+
+- clone/auth/network/push failure writes `history/outbox/hub/<timestamp>-<project>-hub-submit-failed.md` in the source project.
+- failed pushes keep the local hub commit for retry.
+- lint errors stop submission; `--strict` also treats lint warnings as blockers.
+- use SSH deploy keys or a credential helper; do not put PATs or tokens in remote URLs.
 
 ## Vendored Retrieval
 

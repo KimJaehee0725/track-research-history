@@ -71,13 +71,20 @@ ssh-keygen -t ed25519 -f ~/.ssh/research-memory-alienlm -C "laptop-alienlm-write
 chmod 600 ~/.ssh/research-memory-alienlm
 ```
 
-서버의 `authorized_keys`에는 공개 키 한 줄마다 forced command와 프로젝트 권한을 붙입니다. 아래 예시는 `alienlm`만 읽고 쓸 수 있는 키입니다. 정확한 템플릿은 [deploy/ssh/authorized_keys.example](../deploy/ssh/authorized_keys.example)를 기준으로 합니다.
+배포된 서버에서는 `authorized_keys` 줄을 수동으로 조립하지 말고 키 관리 도구로 등록합니다. 다음 명령은 `alienlm`만 읽고 쓸 수 있는 공개키를 추가합니다.
 
-```text
-restrict,command="/opt/research-memory/.venv/bin/python /opt/research-memory/server/rpc.py --data-dir /srv/research-memory --allow-project alienlm --permission write --actor laptop-alienlm-write" ssh-ed25519 AAAA... laptop-alienlm-write
+```bash
+sudo /opt/research-memory/.venv/bin/python \
+  /opt/research-memory/server/admin.py key grant \
+  --project alienlm \
+  --permission write \
+  --actor laptop-alienlm-rw \
+  --public-key ~/.ssh/research-memory-alienlm.pub
 ```
 
-`restrict`는 PTY, 포트 포워딩, agent forwarding, X11 forwarding, 일반 셸을 차단합니다. 읽기 전용 키는 `--permission read`를 사용합니다. `--actor`는 감사 로그에 남는 서버 소유 키 식별자이므로 장비·프로젝트·권한을 알아볼 수 있게 고정합니다. 여러 프로젝트가 필요한 키는 서버 관리자가 `--allow-project`를 반복해 명시하되, 일반적인 컨테이너에는 단일 프로젝트 키를 권장합니다.
+도구는 해당 프로젝트·권한을 고정한 `restrict,command=...` SSH entry를 만들고, 나중에 `actor`로 조회·폐기할 수 있는 marker를 함께 기록합니다. 기존의 다른 `authorized_keys` 항목은 보존합니다. 생성되는 형식은 [deploy/ssh/authorized_keys.example](../deploy/ssh/authorized_keys.example)에서 확인할 수 있습니다.
+
+`restrict`는 PTY, 포트 포워딩, agent forwarding, X11 forwarding, 일반 셸을 차단합니다. 읽기 전용 키는 `--permission read`를 사용합니다. `--actor`는 감사 로그와 키 폐기에 쓰이는 서버 소유 식별자이므로 장비·프로젝트·권한을 알아볼 수 있게 고정합니다. 일반적인 컨테이너에는 단일 프로젝트 키를 권장합니다.
 
 이 키는 UI 터널용 관리자 키와 분리해야 합니다. UI를 여는 계정에는 이 forced command를 쓰지 말고, 별도의 사람용 SSH 계정·키와 일반 SSH 접근 정책을 사용합니다.
 
@@ -90,14 +97,18 @@ sudo sshd -t
 sudo systemctl reload ssh
 ```
 
-클라이언트에서는 예제 설정을 저장소 밖에 복사해 경로를 채웁니다.
+클라이언트에서는 연결·프로젝트·키 경로를 로컬 프로필에 한 번만 저장합니다.
 
 ```bash
-mkdir -p ~/.config/research-memory
-cp examples/memory-client.json.example ~/.config/research-memory/client.json
-chmod 600 ~/.config/research-memory/client.json
-client/memctl.py --config ~/.config/research-memory/client.json project list
-client/memctl.py --config ~/.config/research-memory/client.json project init alienlm --title "AlienLM" --enable-git
+client/memctl.py profile add alienlm-rw \
+  --project alienlm \
+  --host memory-server-alias \
+  --user memory-rpc \
+  --identity "$HOME/.ssh/research-memory-alienlm" \
+  --known-hosts "$HOME/.ssh/known_hosts" \
+  --set-default
+client/memctl.py project list
+client/memctl.py project init alienlm --title "AlienLM" --enable-git
 ```
 
 첫 명령이 JSON 응답을 반환하면 SSH forced command, 키 권한, 서버 저장소가 모두 연결된 것입니다. `memory-rpc`라는 원격 명령은 식별용이며, 서버는 `SSH_ORIGINAL_COMMAND`를 신뢰하지 않습니다.
@@ -110,3 +121,4 @@ client/memctl.py --config ~/.config/research-memory/client.json project init ali
 - 프로젝트/노트 삭제는 UI 또는 `memctl`을 사용합니다. 서버 파일을 직접 지우면 휴지통·revision·감사 기록을 우회합니다.
 - 서버 내 실제 메모리를 GitHub 공개 원격에 push하지 않습니다. 백업 remote는 별도의 private 저장소여야 합니다.
 - OS 보안 업데이트와 디스크 SMART/여유 공간 확인은 서버 운영자의 정기 작업으로 둡니다.
+- Compose UI가 정상 동작하는 서버는 그대로 유지합니다. systemd UI로 바꾸려면 먼저 Compose를 중지하고, 백업·loopback bind·SSH RPC smoke를 확인하는 별도 점검 시간에만 전환합니다. 두 UI 방식을 동시에 실행하지 않습니다.

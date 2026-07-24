@@ -20,6 +20,33 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+try:  # ``python client/memctl.py`` and ``python -m client.memctl`` both work.
+    from profiles import (
+        ProfileError,
+        add_profile,
+        config_path as profile_config_path,
+        default_config_path as profile_default_config_path,
+        get_profile,
+        load_config,
+        remove_profile,
+        resolve_profile_config,
+        set_default_profile,
+        validate_profile_name,
+    )
+except ImportError:  # pragma: no cover - exercised by module-style consumers.
+    from client.profiles import (  # type: ignore[no-redef]
+        ProfileError,
+        add_profile,
+        config_path as profile_config_path,
+        default_config_path as profile_default_config_path,
+        get_profile,
+        load_config,
+        remove_profile,
+        resolve_profile_config,
+        set_default_profile,
+        validate_profile_name,
+    )
+
 
 PROTOCOL_VERSION = 1
 REMOTE_COMMAND = "memory-rpc"
@@ -60,41 +87,23 @@ def json_dump(value: Any, *, stream: Any = sys.stdout, pretty: bool = False) -> 
 
 
 def default_config_path() -> Path:
-    base = os.environ.get("XDG_CONFIG_HOME")
-    if base:
-        return Path(base).expanduser() / "research-memory" / "client.json"
-    return Path.home() / ".config" / "research-memory" / "client.json"
+    """Compatibility wrapper for callers that imported this helper from memctl."""
+
+    return profile_default_config_path()
 
 
 def read_config(path_value: str | None) -> dict[str, Any]:
-    """Read an optional non-secret JSON connection config.
+    """Read a flat-compatible config without selecting a profile.
 
-    ``--config`` and ``MEMORY_CONFIG`` are explicit and therefore fail if the
-    file does not exist.  The conventional default is optional so a first run
-    can be configured entirely with command-line flags or environment values.
+    Normal commands use :func:`resolve_profile_config` instead.  Keeping this
+    wrapper makes external callers of the previous small client API continue
+    to receive the raw connection document.
     """
 
-    explicit = path_value or os.environ.get("MEMORY_CONFIG")
-    path = Path(explicit).expanduser() if explicit else default_config_path()
-    if not path.exists():
-        if explicit:
-            raise ClientError(f"connection config does not exist: {path}")
-        return {}
-    if not path.is_file():
-        raise ClientError(f"connection config is not a file: {path}")
     try:
-        text = path.read_text(encoding="utf-8")
-    except OSError as exc:
-        raise ClientError(f"cannot read connection config: {path}: {exc}") from exc
-    if len(text.encode("utf-8")) > 128 * 1024:
-        raise ClientError("connection config is unexpectedly large")
-    try:
-        parsed = json.loads(text)
-    except json.JSONDecodeError as exc:
-        raise ClientError(f"connection config is not valid JSON: {path}: {exc.msg}") from exc
-    if not isinstance(parsed, dict):
-        raise ClientError("connection config must be a JSON object")
-    return parsed
+        return load_config(path_value)
+    except ProfileError as exc:
+        raise ClientError(str(exc)) from exc
 
 
 def config_value(
@@ -196,8 +205,14 @@ def optional_path(value: Any, field: str) -> str | None:
     return str(path)
 
 
-def resolve_connection(args: argparse.Namespace) -> Connection:
-    config = read_config(args.config)
+def resolve_connection(
+    args: argparse.Namespace, config: dict[str, Any] | None = None
+) -> Connection:
+    if config is None:
+        try:
+            config = resolve_profile_config(args.config, getattr(args, "profile", None))
+        except ProfileError as exc:
+            raise ClientError(str(exc)) from exc
     host_value = config_value(args.host, "MEMORY_HOST", config, "host")
     if host_value is None:
         raise ClientError("server host is required (--host, MEMORY_HOST, or config host)")
@@ -312,6 +327,190 @@ def read_note_input(args: argparse.Namespace) -> str:
     if "\x00" in content:
         raise ClientError("note input cannot contain NUL bytes")
     return content
+
+
+def profile_name_argument(value: str) -> str:
+    try:
+        return validate_profile_name(value)
+    except ProfileError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+
+
+def _validated_project(value: Any, *, source: str) -> str:
+    try:
+        return validate_project(str(value))
+    except argparse.ArgumentTypeError as exc:
+        raise ClientError(f"{source}: {exc}") from exc
+
+
+def _validated_note_path(value: Any, *, source: str) -> str:
+    try:
+        return validate_note_path(str(value))
+    except argparse.ArgumentTypeError as exc:
+        raise ClientError(f"{source}: {exc}") from exc
+
+
+def _validated_query(value: Any, *, source: str) -> str:
+    try:
+        return query_argument(str(value))
+    except argparse.ArgumentTypeError as exc:
+        raise ClientError(f"{source}: {exc}") from exc
+
+
+def _validated_trash_id(value: Any, *, source: str) -> str:
+    try:
+        return validate_trash_id(str(value))
+    except argparse.ArgumentTypeError as exc:
+        raise ClientError(f"{source}: {exc}") from exc
+
+
+def normalize_note_arguments(args: argparse.Namespace, profile_project: Any) -> None:
+    """Resolve optional note project positionals without changing legacy calls.
+
+    A selected profile may provide a default project.  In that case one target
+    means a note path/query; two targets retain the historic explicit
+    ``PROJECT PATH`` / ``PROJECT QUERY`` form.  Without a profile, only the
+    original explicit forms are accepted.
+    """
+
+    if args.command != "note":
+        return
+    default_project = (
+        _validated_project(profile_project, source="profile project")
+        if profile_project not in (None, "")
+        else None
+    )
+    if args.note_command == "list":
+        if args.project is None:
+            if default_project is None:
+                raise ClientError(
+                    "project is required unless a selected profile supplies a default project"
+                )
+            args.project = default_project
+        return
+
+    targets = args.targets
+    if len(targets) == 1:
+        if default_project is None:
+            raise ClientError(
+                "project is required unless a selected profile supplies a default project"
+            )
+        args.project = default_project
+        payload = targets[0]
+    elif len(targets) == 2:
+        args.project = _validated_project(targets[0], source="project")
+        payload = targets[1]
+    else:
+        raise ClientError(
+            "use PROJECT plus the target, or a single target with a selected profile"
+        )
+
+    if args.note_command in {"read", "write", "delete"}:
+        args.path = _validated_note_path(payload, source="note path")
+    elif args.note_command == "restore":
+        args.trash_id = _validated_trash_id(payload, source="trash ID")
+    elif args.note_command == "search":
+        args.query = _validated_query(payload, source="search query")
+    else:  # pragma: no cover - argparse keeps this unreachable.
+        raise ClientError("unknown note command")
+
+
+def profile_values_from_args(args: argparse.Namespace) -> dict[str, Any]:
+    """Build a persisted profile from validated, non-secret CLI options."""
+
+    values: dict[str, Any] = {"project": args.project}
+    if args.host is not None:
+        values["host"] = validate_host(args.host)
+    if args.user is not None:
+        values["user"] = validate_user(args.user)
+    if args.identity_file is not None:
+        values["identity_file"] = optional_path(args.identity_file, "identity file")
+    if args.port is not None:
+        values["port"] = validate_port(args.port)
+    if args.ssh_config is not None:
+        values["ssh_config"] = optional_path(args.ssh_config, "SSH config")
+    if args.known_hosts is not None:
+        values["known_hosts"] = optional_path(args.known_hosts, "known_hosts file")
+    if args.ssh_option:
+        values["ssh_options"] = [validate_ssh_option(value) for value in args.ssh_option]
+    if args.timeout is not None:
+        values["timeout"] = validate_timeout(args.timeout)
+    return values
+
+
+def profile_response(args: argparse.Namespace) -> dict[str, Any]:
+    """Handle local profile management without contacting the SSH server."""
+
+    try:
+        path, _ = profile_config_path(args.config)
+        if args.profile_command == "list":
+            document = load_config(args.config)
+            default_name = document.get("default_profile")
+            items = [
+                {
+                    "name": name,
+                    "project": profile.get("project"),
+                    "is_default": name == default_name,
+                }
+                for name, profile in sorted(document.get("profiles", {}).items())
+            ]
+            return {
+                "ok": True,
+                "result": {
+                    "config": str(path),
+                    "default_profile": default_name,
+                    "profiles": items,
+                },
+            }
+        if args.profile_command == "show":
+            document = load_config(args.config)
+            profile = get_profile(document, args.name)
+            return {
+                "ok": True,
+                "result": {
+                    "config": str(path),
+                    "name": args.name,
+                    "is_default": document.get("default_profile") == args.name,
+                    "profile": profile,
+                    "resolved": resolve_profile_config(args.config, args.name),
+                },
+            }
+        if args.profile_command == "add":
+            stored_path, profile = add_profile(
+                args.config,
+                args.name,
+                profile_values_from_args(args),
+                set_default=args.set_default,
+                replace=args.replace,
+            )
+            return {
+                "ok": True,
+                "result": {
+                    "config": str(stored_path),
+                    "name": args.name,
+                    "profile": profile,
+                    "default_profile": load_config(args.config).get("default_profile"),
+                },
+            }
+        if args.profile_command == "use":
+            stored_path = set_default_profile(args.config, args.name)
+            return {
+                "ok": True,
+                "result": {"config": str(stored_path), "default_profile": args.name},
+            }
+        if args.profile_command == "remove":
+            stored_path, was_default = remove_profile(args.config, args.name)
+            return {
+                "ok": True,
+                "result": {
+                    "config": str(stored_path),
+                    "removed": args.name,
+                    "cleared_default": was_default,
+                },
+            }
+    except ProfileError as exc:
+        raise ClientError(str(exc)) from exc
+    raise ClientError("unknown profile command")
 
 
 def request_for(args: argparse.Namespace) -> dict[str, Any]:
@@ -463,6 +662,12 @@ def build_parser() -> argparse.ArgumentParser:
         )
     )
     parser.add_argument("--config", metavar="FILE", help="non-secret JSON connection config")
+    parser.add_argument(
+        "--profile",
+        metavar="NAME",
+        type=profile_name_argument,
+        help="connection/profile name (otherwise MEMORY_PROFILE or the configured default)",
+    )
     parser.add_argument("--host", help="SSH host alias, hostname, or IP address")
     parser.add_argument("--user", help="SSH user (separate from the host alias)")
     parser.add_argument("--identity", metavar="FILE", help="SSH private-key file path")
@@ -490,6 +695,31 @@ def build_parser() -> argparse.ArgumentParser:
 
     commands = parser.add_subparsers(dest="command", required=True)
 
+    profile = commands.add_parser("profile", help="manage local non-secret connection profiles")
+    profile_commands = profile.add_subparsers(dest="profile_command", required=True)
+    profile_commands.add_parser("list", help="list locally configured profiles")
+    profile_show = profile_commands.add_parser("show", help="show one local profile and resolution")
+    profile_show.add_argument("name", type=profile_name_argument)
+    profile_use = profile_commands.add_parser("use", help="set the default local profile")
+    profile_use.add_argument("name", type=profile_name_argument)
+    profile_remove = profile_commands.add_parser("remove", help="remove one local profile")
+    profile_remove.add_argument("name", type=profile_name_argument)
+    profile_add = profile_commands.add_parser("add", help="add a local profile (never stores key data)")
+    profile_add.add_argument("name", type=profile_name_argument)
+    profile_add.add_argument("--project", required=True, type=validate_project)
+    profile_add.add_argument("--host", help="SSH host alias, hostname, or IP address")
+    profile_add.add_argument("--user", help="SSH user (separate from the host alias)")
+    profile_add.add_argument("--identity", dest="identity_file", metavar="FILE", help="SSH key path")
+    profile_add.add_argument("--port", help="SSH port")
+    profile_add.add_argument("--ssh-config", metavar="FILE", help="OpenSSH config file path")
+    profile_add.add_argument("--known-hosts", metavar="FILE", help="known_hosts file path")
+    profile_add.add_argument(
+        "--ssh-option", action="append", metavar="NAME=VALUE", help="safe OpenSSH option"
+    )
+    profile_add.add_argument("--timeout", help="SSH RPC timeout in seconds")
+    profile_add.add_argument("--set-default", action="store_true", help="select this profile by default")
+    profile_add.add_argument("--replace", action="store_true", help="replace an existing profile")
+
     project = commands.add_parser("project", help="create or list projects")
     project_commands = project.add_subparsers(dest="project_command", required=True)
     project_commands.add_parser("list", help="list accessible projects")
@@ -507,17 +737,30 @@ def build_parser() -> argparse.ArgumentParser:
     note_commands = note.add_subparsers(dest="note_command", required=True)
 
     note_list = note_commands.add_parser("list", help="list notes in a project")
-    note_list.add_argument("project", type=validate_project)
+    note_list.add_argument(
+        "project",
+        nargs="?",
+        type=validate_project,
+        help="project (optional when the selected profile supplies one)",
+    )
     note_list.add_argument("--include-deleted", action="store_true", help="also list trashed notes")
 
     note_read = note_commands.add_parser("read", help="read one Markdown note")
-    note_read.add_argument("project", type=validate_project)
-    note_read.add_argument("path", type=note_path_argument)
+    note_read.add_argument(
+        "targets",
+        nargs="+",
+        metavar="TARGET",
+        help="PROJECT PATH, or PATH with a selected profile",
+    )
     note_read.add_argument("--include-deleted", action="store_true", help="also read a trashed note")
 
     note_write = note_commands.add_parser("write", help="write UTF-8 Markdown from a file or stdin")
-    note_write.add_argument("project", type=validate_project)
-    note_write.add_argument("path", type=note_path_argument)
+    note_write.add_argument(
+        "targets",
+        nargs="+",
+        metavar="TARGET",
+        help="PROJECT PATH, or PATH with a selected profile",
+    )
     input_group = note_write.add_mutually_exclusive_group(required=True)
     input_group.add_argument("--file", metavar="FILE", help="UTF-8 Markdown file")
     input_group.add_argument("--stdin", action="store_true", help="read UTF-8 Markdown from stdin")
@@ -525,18 +768,30 @@ def build_parser() -> argparse.ArgumentParser:
     note_write.add_argument("--if-revision", type=revision_argument, help="expected current revision")
 
     note_delete = note_commands.add_parser("delete", help="move a note to server-side trash")
-    note_delete.add_argument("project", type=validate_project)
-    note_delete.add_argument("path", type=note_path_argument)
+    note_delete.add_argument(
+        "targets",
+        nargs="+",
+        metavar="TARGET",
+        help="PROJECT PATH, or PATH with a selected profile",
+    )
     note_delete.add_argument("--if-revision", type=revision_argument, help="expected current revision")
 
     note_restore = note_commands.add_parser("restore", help="restore one server-side trash item")
-    note_restore.add_argument("project", type=validate_project)
-    note_restore.add_argument("trash_id", type=validate_trash_id)
+    note_restore.add_argument(
+        "targets",
+        nargs="+",
+        metavar="TARGET",
+        help="PROJECT TRASH_ID, or TRASH_ID with a selected profile",
+    )
     note_restore.add_argument("--if-revision", type=revision_argument, help="expected trash revision")
 
     note_search = note_commands.add_parser("search", help="full-text search within one project")
-    note_search.add_argument("project", type=validate_project)
-    note_search.add_argument("query", type=query_argument)
+    note_search.add_argument(
+        "targets",
+        nargs="+",
+        metavar="TARGET",
+        help="PROJECT QUERY, or QUERY with a selected profile",
+    )
     note_search.add_argument("--limit", type=positive_limit, default=20)
     note_search.add_argument("--include-deleted", action="store_true", help="also search trashed notes")
 
@@ -547,8 +802,18 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
+        if args.command == "profile":
+            response = profile_response(args)
+            output: Any = response.get("result", response) if args.result_only else response
+            json_dump(output, pretty=args.pretty)
+            return 0
+        try:
+            config = resolve_profile_config(args.config, args.profile)
+        except ProfileError as exc:
+            raise ClientError(str(exc)) from exc
+        normalize_note_arguments(args, config.get("project"))
         request = request_for(args)
-        connection = resolve_connection(args)
+        connection = resolve_connection(args, config)
         response, exit_code = call_remote(request, connection, dry_run=args.dry_run)
         output: Any = response.get("result", response) if args.result_only else response
         json_dump(output, pretty=args.pretty)

@@ -5,7 +5,7 @@
 ## 접근 키 원칙
 
 - 키는 **장비 × 프로젝트 × 권한** 단위로 분리합니다. 예: `laptop-alienlm-read`, `lab-gpu-alienlm-write`.
-- 컨테이너에는 `memory-run --identity`로 필요한 개인 키 하나만 read-only mount합니다.
+- 컨테이너에는 `memory-run --profile` 또는 명시형 `--identity`로 필요한 개인 키 하나만 read-only mount합니다.
 - `authorized_keys`의 forced command에는 `--allow-project`와 `--permission read|write`를 명시합니다.
 - UI 터널용 관리자 SSH 키와 RPC 키는 다른 계정 또는 다른 키여야 합니다.
 - 개인 키, passphrase, API token, 실제 노트 본문은 Git, 이미지 레이어, `.env`, CI 로그에 넣지 않습니다.
@@ -20,17 +20,25 @@
 ssh-keygen -t ed25519 -f ~/.ssh/research-memory-alienlm-2026q3 -C "laptop-alienlm-write-2026q3"
 chmod 600 ~/.ssh/research-memory-alienlm-2026q3
 
-# 2. 새 공개 키를 서버 authorized_keys에 기존 키와 함께 추가
-#    forced command, --allow-project, --permission을 다시 확인
+# 2. 새 공개 키를 서버에 기존 키와 함께 등록
+sudo /opt/research-memory/.venv/bin/python \
+  /opt/research-memory/server/admin.py key grant \
+  --project alienlm \
+  --permission write \
+  --actor laptop-alienlm-write-2026q3 \
+  --public-key ~/.ssh/research-memory-alienlm-2026q3.pub
 
 # 3. 새 키로 read와 write를 모두 테스트
-client/memctl.py --host research-memory.example.edu --user memory-rpc \
+client/memctl.py --host memory-server-alias --user memory-rpc \
   --identity ~/.ssh/research-memory-alienlm-2026q3 project list
 
-# 4. 모든 필요한 장비가 새 키로 전환된 뒤 기존 공개 키 줄을 제거
+# 4. 모든 필요한 장비가 새 키로 전환된 뒤 기존 actor의 접근을 폐기
+sudo /opt/research-memory/.venv/bin/python \
+  /opt/research-memory/server/admin.py key revoke \
+  --actor laptop-alienlm-write
 ```
 
-유출이 의심되면 2–3단계를 건너뛰고 해당 공개 키를 즉시 제거한 뒤, 감사 기록에서 그 키가 사용된 프로젝트와 시간대를 확인합니다. 키 파일을 삭제하는 것만으로는 서버 접근이 철회되지 않습니다.
+유출이 의심되면 2–3단계를 건너뛰고 해당 `actor`를 즉시 폐기한 뒤, 감사 기록에서 그 키가 사용된 프로젝트와 시간대를 확인합니다. 키 파일을 삭제하는 것만으로는 서버 접근이 철회되지 않습니다.
 
 ## 백업 정책
 

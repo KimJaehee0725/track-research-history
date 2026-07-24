@@ -58,6 +58,8 @@ printf '%s\n' '{"version":1,"op":"project.list","params":{}}' | \
 
 ## systemd alternative
 
+Compose와 systemd는 UI를 띄우는 **대안**입니다. 현재 Compose UI가 정상 동작한다면 그대로 유지합니다. systemd 단일 런타임으로 바꾸는 작업은 서비스 중단, 백업, loopback bind 검사, UI/RPC smoke를 포함한 별도 점검 시간에만 수행하고 두 방식을 동시에 실행하지 않습니다.
+
 For a host virtual environment installation, copy
 `systemd/research-memory-ui.service` to `/etc/systemd/system/`, verify that
 `/opt/research-memory` contains this checkout and its virtual environment, then
@@ -78,8 +80,21 @@ consistent across the systemd and Compose options.
 
 The JSON-lines RPC endpoint is for containers and non-UI clients. Create the
 dedicated `memory-rpc` account, install the `sshd_config.d` fragment, and add
-only forced-command keys based on
-`ssh/authorized_keys.example`. Validate SSH configuration before reload:
+only forced-command keys. The server-side helper is safer than manually
+assembling an `authorized_keys` line:
+
+```bash
+sudo /opt/research-memory/.venv/bin/python \
+  /opt/research-memory/server/admin.py key grant \
+  --project example-project \
+  --permission write \
+  --actor laptop-example-project-rw \
+  --public-key /safe/path/to/key.pub
+```
+
+The helper preserves unrelated `authorized_keys` entries and manages only its
+own marked RPC entries. `ssh/authorized_keys.example` remains the reference
+format. Validate SSH configuration before reload:
 
 ```bash
 sudo sshd -t
@@ -90,3 +105,7 @@ The forced command is `server/rpc.py`, which ignores arbitrary remote command
 text and never starts a shell or subprocess. Scope is fixed by the key's
 `--allow-project` and `--permission` arguments. The RPC account cannot make
 port forwards; use a separate administrator SSH account for the UI tunnel.
+
+Do not move this forced command into Docker by giving `memory-rpc` access to
+the Docker socket or `docker` group: that access is effectively host-root
+privilege. Keep the RPC account on the host with its limited forced command.

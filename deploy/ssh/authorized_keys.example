@@ -1,5 +1,11 @@
 # Example entries for /home/memory-rpc/.ssh/authorized_keys.
 #
+# On a deployed server, prefer generating these entries with:
+#   sudo /opt/research-memory/.venv/bin/python \
+#     /opt/research-memory/server/admin.py key grant ...
+# The helper adds a marker required for safe list/revoke operations. These
+# lines remain a policy-format reference rather than a file to copy verbatim.
+#
 # Replace the placeholder public keys.  The policy arguments are server-owned:
 # a client cannot expand its project scope or write permission through stdin or
 # SSH_ORIGINAL_COMMAND.  `restrict` disables forwarding, ptys, X11, agent

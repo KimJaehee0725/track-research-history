@@ -8,9 +8,13 @@ set -euo pipefail
 usage() {
   cat <<'EOF'
 Usage:
+  memory-run --profile NAME [connection options] [Docker options] -- IMAGE [COMMAND ...]
   memory-run --project PROJECT --identity KEY [connection options] [Docker options] -- IMAGE [COMMAND ...]
 
-Required:
+Profile option:
+  --profile NAME             Resolve project, key path, and connection from a local memctl profile
+
+Required without --profile:
   --project PROJECT          Project scope exposed to the container
   --identity KEY             SSH private key mounted read-only into the container
 
@@ -32,7 +36,7 @@ Container options:
 
 Place -- before IMAGE. The image needs Python 3 and an OpenSSH client. Inside
 the container, use:
-  python "$RESEARCH_MEMORY_MEMCTL" note list "$RESEARCH_MEMORY_PROJECT"
+  python "$RESEARCH_MEMORY_MEMCTL" note list
 EOF
 }
 
@@ -47,6 +51,9 @@ need_value() {
 
 absolute_file() {
   local candidate="$1"
+  if [[ "$candidate" == "~/"* ]]; then
+    candidate="$HOME/${candidate:2}"
+  fi
   [[ -f "$candidate" ]] || die "file does not exist: $candidate"
   [[ "$candidate" != *$'\n'* && "$candidate" != *,* ]] || die "file path contains an unsupported character"
   (
@@ -72,8 +79,43 @@ container_path() {
   printf '%s\n' "${candidate%/}"
 }
 
+default_profile_config() {
+  if [[ -n "${MEMORY_CONFIG:-}" ]]; then
+    printf '%s\n' "$MEMORY_CONFIG"
+  elif [[ -n "${XDG_CONFIG_HOME:-}" ]]; then
+    printf '%s/research-memory/client.json\n' "$XDG_CONFIG_HOME"
+  else
+    printf '%s/.config/research-memory/client.json\n' "$HOME"
+  fi
+}
+
+profile_value() {
+  local field="$1"
+  local optional="${2:-0}"
+  local value
+  local -a command=(
+    python3 "$client_dir/profiles.py" get
+    --config "$config" --profile "$profile" --field "$field"
+  )
+  if [[ "$optional" == "1" ]]; then
+    command+=(--optional)
+  fi
+  if ! value="$("${command[@]}")"; then
+    return 2
+  fi
+  if [[ -z "$value" && "$optional" == "1" ]]; then
+    return 1
+  fi
+  if [[ -z "$value" || "$value" == *$'\n'* ]]; then
+    printf "memory-run: profile '%s' has an invalid '%s' value\n" "$profile" "$field" >&2
+    return 2
+  fi
+  printf '%s\n' "$value"
+}
+
 project=""
 identity=""
+profile=""
 host=""
 ssh_user=""
 ssh_port=""
@@ -101,6 +143,11 @@ while [[ $# -gt 0 ]]; do
     --identity)
       need_value "$@"
       identity="$2"
+      shift 2
+      ;;
+    --profile)
+      need_value "$@"
+      profile="$2"
       shift 2
       ;;
     --host)
@@ -171,16 +218,52 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-[[ -n "$project" ]] || die "--project is required"
-[[ "$project" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || \
-  die "project must use only letters, numbers, dot, underscore, or hyphen"
-[[ -n "$identity" ]] || die "--identity is required; do not bake a key into the image"
-[[ -n "$host" || -n "$config" ]] || die "provide --host or a --config file containing host"
 [[ $# -gt 0 ]] || die "an IMAGE is required after --"
 
-identity="$(absolute_file "$identity")"
 client_dir="$(absolute_dir "$client_dir")"
 [[ -f "$client_dir/memctl.py" ]] || die "client directory must contain memctl.py: $client_dir"
+if [[ -n "$profile" ]]; then
+  [[ "$profile" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || \
+    die "profile must use only letters, numbers, dot, underscore, or hyphen"
+  [[ -f "$client_dir/profiles.py" ]] || die "client directory must contain profiles.py: $client_dir"
+  if [[ -z "$config" ]]; then
+    config="$(default_profile_config)"
+  fi
+  if [[ -z "$project" ]]; then
+    project="$(profile_value project)"
+  fi
+  if [[ -z "$identity" ]]; then
+    identity="$(profile_value identity_file)"
+  fi
+  if [[ -z "$ssh_config" ]]; then
+    if resolved_ssh_config="$(profile_value ssh_config 1)"; then
+      ssh_config="$resolved_ssh_config"
+    else
+      profile_value_status=$?
+      if [[ "$profile_value_status" -ne 1 ]]; then
+        die "could not resolve profile '$profile' field 'ssh_config'"
+      fi
+    fi
+  fi
+  if [[ -z "$known_hosts" ]]; then
+    if resolved_known_hosts="$(profile_value known_hosts 1)"; then
+      known_hosts="$resolved_known_hosts"
+    else
+      profile_value_status=$?
+      if [[ "$profile_value_status" -ne 1 ]]; then
+        die "could not resolve profile '$profile' field 'known_hosts'"
+      fi
+    fi
+  fi
+fi
+
+[[ -n "$project" ]] || die "--project is required unless --profile supplies one"
+[[ "$project" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || \
+  die "project must use only letters, numbers, dot, underscore, or hyphen"
+[[ -n "$identity" ]] || die "--identity is required unless --profile supplies one; do not bake a key into the image"
+[[ -n "$host" || -n "$config" ]] || die "provide --host, --config, or --profile"
+
+identity="$(absolute_file "$identity")"
 container_dir="$(container_path "$container_dir")"
 container_client_dir="$(container_path "$container_client_dir")"
 
@@ -222,6 +305,13 @@ run+=(
   -e "MEMORY_IDENTITY_FILE=$container_dir/id_ed25519"
 )
 
+if [[ -n "$profile" ]]; then
+  run+=(
+    -e "MEMORY_PROFILE=$profile"
+    -e "RESEARCH_MEMORY_PROFILE=$profile"
+  )
+fi
+
 if [[ -n "$host" ]]; then run+=(-e "MEMORY_HOST=$host"); fi
 if [[ -n "$ssh_user" ]]; then run+=(-e "MEMORY_USER=$ssh_user"); fi
 if [[ -n "$ssh_port" ]]; then run+=(-e "MEMORY_PORT=$ssh_port"); fi
@@ -244,5 +334,8 @@ if [[ -n "$known_hosts" ]]; then
   )
 fi
 
-run+=("${docker_args[@]}" "$@")
+if [[ ${#docker_args[@]} -gt 0 ]]; then
+  run+=("${docker_args[@]}")
+fi
+run+=("$@")
 exec "${run[@]}"

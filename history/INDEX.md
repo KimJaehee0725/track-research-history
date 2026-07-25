@@ -1,6 +1,6 @@
 # History Index
 
-Generated: 2026-07-24 20:53 +0900
+Generated: 2026-07-25 16:18 +0900
 
 ## Current Context
 
@@ -11,6 +11,7 @@ Generated: 2026-07-24 20:53 +0900
 
 ### daily
 
+- `history/daily/2026-07-25.md` - Daily Log - 2026-07-25
 - `history/daily/2026-07-24.md` - Daily Log - 2026-07-24
 - `history/daily/2026-07-21.md` - Daily Log - 2026-07-21
 - `history/daily/2026-07-03.md` - Daily Log - 2026-07-03
@@ -20,6 +21,7 @@ Generated: 2026-07-24 20:53 +0900
 
 ### changes
 
+- `history/changes/2026-07-25-161828-synchronize-latest-memory-server-release-without-overwriting-loc.md` - Change - Synchronize latest memory-server release without overwriting local work
 - `history/changes/2026-07-24-205354-ssh.md` - Change - 프로필 기반 메모리 접근과 SSH 키 관리 단순화
 - `history/changes/2026-07-21-204242-private.md` - Change - 개인용 private 미러 저장소 생성
 - `history/changes/2026-07-21-203225-ssh-ui.md` - Change - SSH 중앙 메모리 서버와 관리 UI 추가
@@ -31,7 +33,6 @@ Generated: 2026-07-24 20:53 +0900
 - `history/changes/2026-05-08-190555-change.md` - Change - 사용자 언어 기반 기록 정책 추가
 - `history/changes/2026-05-08-022128-add-collaboration-archive-workflow.md` - Change - Add collaboration archive workflow
 - `history/changes/2026-05-08-020723-fix-collaboration-workflow-review-findings.md` - Change - Fix collaboration workflow review findings
-- `history/changes/2026-05-08-015408-add-large-scale-collaboration-workflow.md` - Change - Add large-scale collaboration workflow
 
 ### decisions
 

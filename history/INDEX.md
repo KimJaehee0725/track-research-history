@@ -1,6 +1,6 @@
 # History Index
 
-Generated: 2026-07-25 16:18 +0900
+Generated: 2026-07-27 13:26 +0900
 
 ## Current Context
 
@@ -11,6 +11,7 @@ Generated: 2026-07-25 16:18 +0900
 
 ### daily
 
+- `history/daily/2026-07-27.md` - Daily Log - 2026-07-27
 - `history/daily/2026-07-25.md` - Daily Log - 2026-07-25
 - `history/daily/2026-07-24.md` - Daily Log - 2026-07-24
 - `history/daily/2026-07-21.md` - Daily Log - 2026-07-21
@@ -21,6 +22,7 @@ Generated: 2026-07-25 16:18 +0900
 
 ### changes
 
+- `history/changes/2026-07-27-132641-research-memory.md` - Change - 개인 비밀번호 전체 프로젝트 Research Memory 모드 추가
 - `history/changes/2026-07-25-161828-synchronize-latest-memory-server-release-without-overwriting-loc.md` - Change - Synchronize latest memory-server release without overwriting local work
 - `history/changes/2026-07-24-205354-ssh.md` - Change - 프로필 기반 메모리 접근과 SSH 키 관리 단순화
 - `history/changes/2026-07-21-204242-private.md` - Change - 개인용 private 미러 저장소 생성

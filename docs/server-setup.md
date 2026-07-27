@@ -62,7 +62,15 @@ ss -ltn | grep 8787
 
 마지막 명령의 리스너가 `127.0.0.1:8787` 또는 `[::1]:8787`인지 확인합니다. `0.0.0.0:8787`이나 공인 IP에 열려 있으면 중지하고 `MEMORY_BIND_HOST=127.0.0.1`으로 고칩니다.
 
-## 3. 컨테이너/에이전트용 SSH 키 등록
+## 3. 개인 비밀번호 전체 접근
+
+개인 서버에서 모든 프로젝트를 하나의 비밀번호로 쓰려면
+[비밀번호 모드](password-mode.md)의 한 번 실행 도우미를 적용합니다. 이 모드는 `memory-rpc` 계정의
+로그인을 RPC 강제 명령으로만 제한하고, 모든 프로젝트에 write 권한을 부여합니다.
+기존 프로젝트별 SSH 키 방식은 호환을 위해 남아 있지만, 이 서버의 기본 운영
+방식으로는 사용하지 않습니다.
+
+## 4. 컨테이너/에이전트용 SSH 키 등록 (호환 모드)
 
 각 장비·프로젝트·권한별로 별도 키를 만듭니다. 예를 들어 AlienLM을 쓸 수 있는 노트북 키는 다음처럼 만듭니다.
 
@@ -88,7 +96,7 @@ sudo /opt/research-memory/.venv/bin/python \
 
 이 키는 UI 터널용 관리자 키와 분리해야 합니다. UI를 여는 계정에는 이 forced command를 쓰지 말고, 별도의 사람용 SSH 계정·키와 일반 SSH 접근 정책을 사용합니다.
 
-## 4. SSH 설정과 동작 확인
+## 5. SSH 설정과 동작 확인
 
 서버에는 [deploy/ssh/sshd_config.d/research-memory.conf](../deploy/ssh/sshd_config.d/research-memory.conf)를 설치하고, 반영 전 설정을 검사합니다.
 
@@ -97,7 +105,19 @@ sudo sshd -t
 sudo systemctl reload ssh
 ```
 
-클라이언트에서는 연결·프로젝트·키 경로를 로컬 프로필에 한 번만 저장합니다.
+비밀번호 모드 클라이언트에서는 실제 값을 무시되는 환경 파일에만 두고, 프로젝트
+목록을 확인합니다. 비밀번호는 화면이나 명령행에 쓰지 않습니다.
+
+```bash
+set -a
+source /safe/ignored/memory-password.env
+set +a
+client/memctl.py project list
+client/memctl.py note list fab-gym
+```
+
+프로젝트별 키 호환 모드를 계속 쓴다면, 이전 public-key SSH 설정 조각을 별도로
+유지한 뒤에만 아래처럼 연결·프로젝트·키 경로를 로컬 프로필에 저장합니다.
 
 ```bash
 client/memctl.py profile add alienlm-rw \
@@ -111,7 +131,7 @@ client/memctl.py project list
 client/memctl.py project init alienlm --title "AlienLM" --enable-git
 ```
 
-첫 명령이 JSON 응답을 반환하면 SSH forced command, 키 권한, 서버 저장소가 모두 연결된 것입니다. `memory-rpc`라는 원격 명령은 식별용이며, 서버는 `SSH_ORIGINAL_COMMAND`를 신뢰하지 않습니다.
+첫 명령이 JSON 응답을 반환하면 SSH forced command와 서버 저장소가 연결된 것입니다. `memory-rpc`라는 원격 명령은 식별용이며, 서버는 `SSH_ORIGINAL_COMMAND`를 신뢰하지 않습니다.
 
 `--enable-git`은 해당 프로젝트 Vault와 `project.yaml`에 대해 서버 로컬 Git 스냅샷을 만듭니다. 원격 Git push나 자격 증명을 설정하지는 않으므로, 실제 재해 복구는 별도 private remote/NAS 백업 정책으로 계속 운영해야 합니다.
 

@@ -70,6 +70,7 @@ class Connection:
     host: str
     user: str | None
     identity_file: str | None
+    password: str | None
     port: int | None
     ssh_config: str | None
     known_hosts: str | None
@@ -170,7 +171,9 @@ def validate_ssh_option(value: Any) -> str:
     return option
 
 
-def read_ssh_options(args: argparse.Namespace, config: dict[str, Any]) -> tuple[str, ...]:
+def read_ssh_options(
+    args: argparse.Namespace, config: dict[str, Any], *, password_auth: bool
+) -> tuple[str, ...]:
     values: list[Any] = []
     configured = config.get("ssh_options", [])
     if configured is not None:
@@ -193,7 +196,22 @@ def read_ssh_options(args: argparse.Namespace, config: dict[str, Any]) -> tuple[
 
     options = [validate_ssh_option(value) for value in values]
     names = {option.split("=", 1)[0].lower() for option in options}
-    if not args.interactive and "batchmode" not in names:
+    if password_auth:
+        # Personal password mode intentionally skips host-key verification at
+        # the operator's request. Keep the policy here rather than relying on
+        # a caller-supplied environment string that could be forgotten.
+        options.extend(
+            [
+                "BatchMode=no",
+                "PubkeyAuthentication=no",
+                "PasswordAuthentication=yes",
+                "KbdInteractiveAuthentication=no",
+                "PreferredAuthentications=password",
+                "StrictHostKeyChecking=no",
+                "UserKnownHostsFile=/dev/null",
+            ]
+        )
+    elif not args.interactive and "batchmode" not in names:
         options.append("BatchMode=yes")
     return tuple(options)
 
@@ -203,6 +221,17 @@ def optional_path(value: Any, field: str) -> str | None:
         return None
     path = Path(require_string(value, field)).expanduser()
     return str(path)
+
+
+def environment_password() -> str | None:
+    """Read an ephemeral password without accepting it from CLI or config files."""
+
+    value = os.environ.get("MEMORY_PASSWORD")
+    if value in (None, ""):
+        return None
+    if "\x00" in value or "\r" in value or "\n" in value:
+        raise ClientError("MEMORY_PASSWORD contains an unsafe control character")
+    return value
 
 
 def resolve_connection(
@@ -218,26 +247,36 @@ def resolve_connection(
         raise ClientError("server host is required (--host, MEMORY_HOST, or config host)")
 
     user_value = config_value(args.user, "MEMORY_USER", config, "user")
-    identity_value = config_value(
-        args.identity, "MEMORY_IDENTITY_FILE", config, "identity_file"
-    )
     port_value = config_value(args.port, "MEMORY_PORT", config, "port")
-    ssh_config_value = config_value(
-        args.ssh_config, "MEMORY_SSH_CONFIG", config, "ssh_config"
-    )
-    known_hosts_value = config_value(
-        args.known_hosts, "MEMORY_KNOWN_HOSTS", config, "known_hosts"
-    )
     timeout_value = config_value(args.timeout, "MEMORY_TIMEOUT", config, "timeout", 30)
 
+    password = environment_password()
+    if password is not None:
+        # Personal password mode must not accidentally reuse a key-mode
+        # config, identity, SSH alias, or known_hosts path inherited from a
+        # parent shell or an older container.
+        identity_value = None
+        ssh_config_value = None
+        known_hosts_value = None
+    else:
+        identity_value = config_value(
+            args.identity, "MEMORY_IDENTITY_FILE", config, "identity_file"
+        )
+        ssh_config_value = config_value(
+            args.ssh_config, "MEMORY_SSH_CONFIG", config, "ssh_config"
+        )
+        known_hosts_value = config_value(
+            args.known_hosts, "MEMORY_KNOWN_HOSTS", config, "known_hosts"
+        )
     return Connection(
         host=validate_host(host_value),
         user=validate_user(user_value) if user_value not in (None, "") else None,
         identity_file=optional_path(identity_value, "identity file"),
+        password=password,
         port=validate_port(port_value) if port_value not in (None, "") else None,
         ssh_config=optional_path(ssh_config_value, "SSH config"),
         known_hosts=optional_path(known_hosts_value, "known_hosts file"),
-        ssh_options=read_ssh_options(args, config),
+        ssh_options=read_ssh_options(args, config, password_auth=password is not None),
         timeout=validate_timeout(timeout_value),
     )
 
@@ -375,16 +414,19 @@ def normalize_note_arguments(args: argparse.Namespace, profile_project: Any) -> 
 
     if args.command != "note":
         return
+    default_project_value = profile_project
+    if default_project_value in (None, ""):
+        default_project_value = os.environ.get("MEMORY_PROJECT")
     default_project = (
-        _validated_project(profile_project, source="profile project")
-        if profile_project not in (None, "")
+        _validated_project(default_project_value, source="default project")
+        if default_project_value not in (None, "")
         else None
     )
     if args.note_command == "list":
         if args.project is None:
             if default_project is None:
                 raise ClientError(
-                    "project is required unless a selected profile supplies a default project"
+                    "project is required unless a selected profile or MEMORY_PROJECT supplies a default project"
                 )
             args.project = default_project
         return
@@ -393,7 +435,7 @@ def normalize_note_arguments(args: argparse.Namespace, profile_project: Any) -> 
     if len(targets) == 1:
         if default_project is None:
             raise ClientError(
-                "project is required unless a selected profile supplies a default project"
+                "project is required unless a selected profile or MEMORY_PROJECT supplies a default project"
             )
         args.project = default_project
         payload = targets[0]
@@ -571,6 +613,8 @@ def request_for(args: argparse.Namespace) -> dict[str, Any]:
 
 def ssh_command(connection: Connection) -> list[str]:
     command = ["ssh"]
+    if connection.password is not None:
+        command = ["sshpass", "-e", *command]
     if connection.ssh_config:
         command.extend(["-F", connection.ssh_config])
     if connection.port:
@@ -619,6 +663,11 @@ def call_remote(
 
     payload = json.dumps(request, ensure_ascii=False, separators=(",", ":")) + "\n"
     try:
+        environment = None
+        if connection.password is not None:
+            environment = os.environ.copy()
+            environment.pop("MEMORY_PASSWORD", None)
+            environment["SSHPASS"] = connection.password
         completed = subprocess.run(
             command,
             input=payload,
@@ -628,9 +677,11 @@ def call_remote(
             capture_output=True,
             timeout=connection.timeout,
             check=False,
+            env=environment,
         )
     except FileNotFoundError as exc:
-        raise ClientError("the 'ssh' command is not available on PATH") from exc
+        executable = command[0]
+        raise ClientError(f"the '{executable}' command is not available on PATH") from exc
     except subprocess.TimeoutExpired as exc:
         raise ClientError(f"SSH RPC timed out after {connection.timeout:g} seconds") from exc
     except OSError as exc:
@@ -807,10 +858,13 @@ def main(argv: list[str] | None = None) -> int:
             output: Any = response.get("result", response) if args.result_only else response
             json_dump(output, pretty=args.pretty)
             return 0
-        try:
-            config = resolve_profile_config(args.config, args.profile)
-        except ProfileError as exc:
-            raise ClientError(str(exc)) from exc
+        if environment_password() is not None and args.config is None and args.profile is None:
+            config = {}
+        else:
+            try:
+                config = resolve_profile_config(args.config, args.profile)
+            except ProfileError as exc:
+                raise ClientError(str(exc)) from exc
         normalize_note_arguments(args, config.get("project"))
         request = request_for(args)
         connection = resolve_connection(args, config)

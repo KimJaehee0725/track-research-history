@@ -12,6 +12,7 @@ import subprocess
 import sys
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -20,6 +21,7 @@ if str(CLIENT) not in sys.path:
     sys.path.insert(0, str(CLIENT))
 
 import profiles  # noqa: E402
+import memctl  # noqa: E402
 
 
 class ClientProfileTests(unittest.TestCase):
@@ -165,6 +167,81 @@ class ClientProfileTests(unittest.TestCase):
         self.assertIsInstance(command, list)
         self.assertIn("memory-rpc@Local", command)
         self.assertIn(str(Path("~/.ssh/flat-key").expanduser()), command)
+
+    def test_password_environment_uses_project_default_without_leaking_secret(self) -> None:
+        password = "not-for-output"
+        code, response, stderr = self.invoke_memctl(
+            "--dry-run",
+            "note",
+            "list",
+            environment={
+                "MEMORY_HOST": "147.47.39.138",
+                "MEMORY_USER": "memory-rpc",
+                "MEMORY_PASSWORD": password,
+                "MEMORY_PROJECT": "fab-gym",
+                "MEMORY_IDENTITY_FILE": "/old/key",
+                "MEMORY_SSH_CONFIG": "/old/config",
+                "MEMORY_KNOWN_HOSTS": "/old/known_hosts",
+            },
+        )
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(response["request"]["project"], "fab-gym")
+        command = response["ssh_command"]
+        self.assertEqual(command[:3], ["sshpass", "-e", "ssh"])
+        self.assertIn("StrictHostKeyChecking=no", command)
+        self.assertIn("UserKnownHostsFile=/dev/null", command)
+        self.assertIn("memory-rpc@147.47.39.138", command)
+        self.assertNotIn("/old/key", command)
+        self.assertNotIn("/old/config", command)
+        self.assertNotIn("/old/known_hosts", command)
+        self.assertNotIn(password, json.dumps(response))
+        self.assertNotIn(password, stderr)
+
+    def test_password_environment_lists_all_projects_without_default_project(self) -> None:
+        code, response, stderr = self.invoke_memctl(
+            "--dry-run",
+            "project",
+            "list",
+            environment={
+                "MEMORY_HOST": "147.47.39.138",
+                "MEMORY_USER": "memory-rpc",
+                "MEMORY_PASSWORD": "not-for-output",
+            },
+        )
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(response["request"]["op"], "project.list")
+        self.assertEqual(response["ssh_command"][:3], ["sshpass", "-e", "ssh"])
+
+    def test_password_transport_passes_secret_only_to_sshpass_environment(self) -> None:
+        connection = memctl.Connection(
+            host="memory.example",
+            user="memory-rpc",
+            identity_file=None,
+            password="not-for-output",
+            port=None,
+            ssh_config=None,
+            known_hosts=None,
+            ssh_options=("BatchMode=no",),
+            timeout=30,
+        )
+
+        class Completed:
+            returncode = 0
+            stdout = '{"ok":true,"result":[]}'
+            stderr = ""
+
+        with patch.object(memctl.subprocess, "run", return_value=Completed()) as run:
+            response, exit_code = memctl.call_remote(
+                {"version": 1, "op": "project.list", "params": {}}, connection, dry_run=False
+            )
+
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(response["ok"])
+        command = run.call_args.args[0]
+        environment = run.call_args.kwargs["env"]
+        self.assertEqual(command[:3], ["sshpass", "-e", "ssh"])
+        self.assertEqual(environment["SSHPASS"], "not-for-output")
+        self.assertNotIn("MEMORY_PASSWORD", environment)
 
     def test_memory_profile_overrides_document_default_and_profile_cli_supports_after_command_flags(self) -> None:
         profiles.add_profile(

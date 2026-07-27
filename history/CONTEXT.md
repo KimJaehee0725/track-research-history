@@ -10,13 +10,13 @@ Last updated: 2026-07-21
 
 - `/srv/research-memory/projects/<project>/vault`의 Markdown이 프로젝트별 원본이다.
 - SQLite FTS5는 검색·revision·휴지통 메타데이터를, JSONL audit은 변경 행위를 보관한다.
-- `client/memctl.py`는 SSH forced command로 접근하고, `server/app.py`는 localhost 전용 관리 UI를 제공한다.
+- `client/memctl.py`는 개인 password 모드 또는 legacy SSH key를 통해 SSH forced command로 접근하고, `server/app.py`는 localhost 전용 관리 UI를 제공한다.
 - private Git hub는 실시간 원본이 아니라 백업·이력 복제 경로로 유지한다.
 
 ## Current Decisions
 
 - 프로젝트 ID와 Markdown 상대 경로는 서버에서 검증한다.
-- 컨테이너에는 프로젝트·권한별 SSH 키 하나만 read-only mount한다.
+- 개인 password 모드는 `memory-rpc`의 password-only forced command로 모든 프로젝트에 접근하며, project 선택은 client 요청에서 한다. legacy key mode는 호환용으로 유지한다.
 - Obsidian은 동일 Vault의 viewer/editor이며, 파일 삭제는 UI 또는 `memctl`만 사용한다.
 
 ## Active Ideas

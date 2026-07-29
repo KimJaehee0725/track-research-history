@@ -1,6 +1,6 @@
 # History Index
 
-Generated: 2026-07-27 13:26 +0900
+Generated: 2026-07-29 17:44 +0900
 
 ## Current Context
 
@@ -11,6 +11,7 @@ Generated: 2026-07-27 13:26 +0900
 
 ### daily
 
+- `history/daily/2026-07-29.md` - Daily Log - 2026-07-29
 - `history/daily/2026-07-27.md` - Daily Log - 2026-07-27
 - `history/daily/2026-07-25.md` - Daily Log - 2026-07-25
 - `history/daily/2026-07-24.md` - Daily Log - 2026-07-24
@@ -22,6 +23,7 @@ Generated: 2026-07-27 13:26 +0900
 
 ### changes
 
+- `history/changes/2026-07-29-174457-obsidian.md` - Change - Obsidian 프로젝트 그래프 허브 자동 생성
 - `history/changes/2026-07-27-132641-research-memory.md` - Change - 개인 비밀번호 전체 프로젝트 Research Memory 모드 추가
 - `history/changes/2026-07-25-161828-synchronize-latest-memory-server-release-without-overwriting-loc.md` - Change - Synchronize latest memory-server release without overwriting local work
 - `history/changes/2026-07-24-205354-ssh.md` - Change - 프로필 기반 메모리 접근과 SSH 키 관리 단순화
@@ -33,8 +35,6 @@ Generated: 2026-07-27 13:26 +0900
 - `history/changes/2026-05-09-025513-bm25-backend-sqlite-fts5-obsidian.md` - Change - BM25 backend을 SQLite FTS5로 교체하고 Obsidian 전환 메모 추가
 - `history/changes/2026-05-08-191426-bm25-markdown-aware-virtual-chunk.md` - Change - BM25 검색을 markdown-aware virtual chunk로 전환
 - `history/changes/2026-05-08-190555-change.md` - Change - 사용자 언어 기반 기록 정책 추가
-- `history/changes/2026-05-08-022128-add-collaboration-archive-workflow.md` - Change - Add collaboration archive workflow
-- `history/changes/2026-05-08-020723-fix-collaboration-workflow-review-findings.md` - Change - Fix collaboration workflow review findings
 
 ### decisions
 

@@ -2,6 +2,18 @@
 
 서버의 프로젝트 Vault는 사람이 읽을 수 있는 Markdown입니다. Obsidian은 이 Markdown을 탐색하고 편집하는 도구일 뿐, 캐시·플러그인 DB·Obsidian Sync를 원본으로 사용하지 않습니다. 원본은 항상 `/srv/research-memory/projects/<project>/vault`와 서버의 revision/감사 기록입니다.
 
+각 Vault의 `project-map.md`는 Research Memory가 자동 생성하는 허브 노트입니다.
+모든 활성 메모리를 `[[Obsidian 링크]]`로 연결하므로, Obsidian Graph에서 프로젝트
+노드가 분리되지 않습니다. 이 파일은 직접 고치거나 삭제하지 않습니다.
+
+기존 서버를 이 기능으로 전환할 때는 서버에서 다음을 한 번 실행한다. 이 명령은
+host RPC runtime과 Compose UI를 함께 갱신하고, 기존 프로젝트의 맵도 생성한다.
+
+```bash
+cd /workspace/track-research-history
+sudo bash deploy/enable-obsidian-graph.sh
+```
+
 ## 권장 사용 방식
 
 | 목적 | 권장 경로 | 이유 |

@@ -113,6 +113,12 @@ branch, use [the private vault backup guide](../docs/private-vault-backup.md).
 The backup is intentionally separate from the source-code `main` branch and
 does not upload SSH keys, passwords, SQLite state, audit logs, or trash.
 
+## Obsidian graph maps
+
+`deploy/enable-obsidian-graph.sh` upgrades both the host RPC runtime and
+Compose UI, then generates one derived `project-map.md` per active project.
+The map supplies Obsidian `[[wiki links]]` without editing individual notes.
+
 Do not move this forced command into Docker by giving `memory-rpc` access to
 the Docker socket or `docker` group: that access is effectively host-root
 privilege. Keep the RPC account on the host with its limited forced command.

@@ -72,6 +72,24 @@ class MemoryStoreTests(unittest.TestCase):
         self.assertEqual(restored.revision, 4)
         self.assertIn("64 starts", self.store.get_note("alienlm", "notes/experiment-01.md").body)
 
+    def test_project_map_links_active_notes_and_is_not_a_memory_note(self) -> None:
+        self.store.create_note(
+            "alienlm",
+            "context/current-state.md",
+            "Current state",
+            "# Current state\n\nTracked by the project map.",
+        )
+        map_path = Path(self.temporary.name) / "projects" / "alienlm" / "vault" / "project-map.md"
+        project_map = map_path.read_text(encoding="utf-8")
+        self.assertIn("[[context/current-state|Current state]]", project_map)
+        self.assertNotIn("project-map.md", [note.note_id for note in self.store.list_notes("alienlm")])
+
+        self.store.delete_note("alienlm", "context/current-state.md")
+        self.assertNotIn("[[context/current-state|Current state]]", map_path.read_text(encoding="utf-8"))
+
+        self.store.restore_note("alienlm", "context/current-state.md")
+        self.assertIn("[[context/current-state|Current state]]", map_path.read_text(encoding="utf-8"))
+
     def test_external_markdown_edit_is_reindexed(self) -> None:
         note = self.store.create_note("alienlm", "notes/direct.md", "Direct", "# Direct\nold text")
         path = Path(self.temporary.name) / "projects" / "alienlm" / "vault" / "notes" / "direct.md"

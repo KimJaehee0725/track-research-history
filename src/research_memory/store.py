@@ -37,6 +37,7 @@ PROJECT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 MAX_NOTE_BYTES = 5 * 1024 * 1024
 MAX_TITLE_CHARS = 256
 MAX_DESCRIPTION_CHARS = 4_000
+PROJECT_MAP_NOTE_ID = "project-map.md"
 
 
 def _timestamp() -> str:
@@ -372,6 +373,75 @@ class MemoryStore:
         )
         self._atomic_write(project_dir / "project.yaml", manifest)
 
+    def _write_project_map(self, connection: sqlite3.Connection, project_id: str) -> None:
+        """Regenerate the Obsidian-facing hub note for one active project.
+
+        The map is deliberately derived rather than a normal memory note: it
+        is not searchable, editable through RPC, or independently deleted.
+        Its wiki links make the project graph useful without changing a
+        researcher's original Markdown body.
+        """
+
+        project = self._active_project_row(connection, project_id)
+        rows = connection.execute(
+            """
+            SELECT note_id, title FROM notes
+            WHERE project_id = ? AND deleted_at IS NULL AND note_id != ?
+            ORDER BY note_id COLLATE NOCASE
+            """,
+            (project_id, PROJECT_MAP_NOTE_ID),
+        ).fetchall()
+        groups: dict[str, list[sqlite3.Row]] = {}
+        for row in rows:
+            parent = PurePosixPath(str(row["note_id"])).parent.as_posix()
+            groups.setdefault("Notes" if parent == "." else parent, []).append(row)
+
+        lines = [
+            "---",
+            "type: project-map",
+            f"project_id: {json.dumps(project_id, ensure_ascii=False)}",
+            f"title: {json.dumps(str(project['title']), ensure_ascii=False)}",
+            "tags: [research-memory, project-map]",
+            "---",
+            "",
+            f"# {project['title']}",
+            "",
+            "이 문서는 Research Memory가 자동 생성하는 Obsidian 프로젝트 허브입니다.",
+            "수정·삭제하지 말고, 실제 메모리는 UI 또는 `memctl`로 관리하세요.",
+        ]
+        if not groups:
+            lines.extend(("", "아직 기록된 메모리가 없습니다."))
+        for group, notes in groups.items():
+            lines.extend(("", f"## {group}"))
+            for row in notes:
+                target = str(row["note_id"])
+                if target.endswith(".md"):
+                    target = target[:-3]
+                label = str(row["title"]).replace("[", "").replace("]", "").replace("|", " ")
+                lines.append(f"- [[{target}|{label}]]")
+        lines.append("")
+        self._atomic_write(self._vault_dir(project_id) / PROJECT_MAP_NOTE_ID, "\n".join(lines))
+
+    def rebuild_project_map(self, project_id: str) -> None:
+        """Refresh one project's derived Obsidian map after a deployment."""
+
+        checked = validate_slug(project_id)
+        with self._locked():
+            connection = self._connect()
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                self._active_project_row(connection, checked)
+                self._refresh_external(connection, checked)
+                self._write_project_map(connection, checked)
+                connection.commit()
+                self._snapshot_project(checked, "memory: refresh Obsidian project map")
+                self._append_audit("project.obsidian_map_refreshed", project_id=checked)
+            except Exception:
+                connection.rollback()
+                raise
+            finally:
+                connection.close()
+
     @staticmethod
     def _expected_revision(value: int | str | None, current: int) -> None:
         if value is None:
@@ -433,6 +503,8 @@ class MemoryStore:
                 note_id = validate_note_path(path.relative_to(vault).as_posix())
                 body = path.read_text(encoding="utf-8")
             except (OSError, UnicodeDecodeError, ValidationError):
+                continue
+            if note_id == PROJECT_MAP_NOTE_ID:
                 continue
             if len(body.encode("utf-8")) > MAX_NOTE_BYTES:
                 continue
@@ -513,6 +585,7 @@ class MemoryStore:
                     """,
                     (checked, checked_title, checked_description, now, now),
                 )
+                self._write_project_map(connection, checked)
                 connection.commit()
                 self._snapshot_project(checked, "memory: initialize project")
                 self._append_audit("project.created", project_id=checked)
@@ -599,6 +672,7 @@ class MemoryStore:
                     "UPDATE projects SET deleted_at = NULL, trash_id = NULL, updated_at = ? WHERE project_id = ?",
                     (now, checked),
                 )
+                self._write_project_map(connection, checked)
                 connection.commit()
                 self._append_audit("project.restored", project_id=checked)
                 return ProjectRecord(checked, row["title"], row["description"], row["created_at"], now)
@@ -646,6 +720,7 @@ class MemoryStore:
                     (checked_project, checked_note, checked_title, digest, now, now),
                 )
                 self._upsert_fts(connection, checked_project, checked_note, checked_title, body)
+                self._write_project_map(connection, checked_project)
                 connection.commit()
                 self._snapshot_project(checked_project, f"memory: create {checked_note}")
                 self._append_audit("note.created", project_id=checked_project, note_id=checked_note)
@@ -696,6 +771,7 @@ class MemoryStore:
                     (checked_title, revision, digest, now, checked_project, checked_note),
                 )
                 self._upsert_fts(connection, checked_project, checked_note, checked_title, body)
+                self._write_project_map(connection, checked_project)
                 connection.commit()
                 self._snapshot_project(checked_project, f"memory: update {checked_note}")
                 self._append_audit("note.updated", project_id=checked_project, note_id=checked_note)
@@ -818,6 +894,7 @@ class MemoryStore:
                     (now, now, trash_id, revision, checked_project, checked_note),
                 )
                 self._remove_fts(connection, checked_project, checked_note)
+                self._write_project_map(connection, checked_project)
                 connection.commit()
                 self._snapshot_project(checked_project, f"memory: delete {checked_note}")
                 self._append_audit("note.deleted", project_id=checked_project, note_id=checked_note, trash_id=trash_id)
@@ -882,6 +959,7 @@ class MemoryStore:
                     (revision, self._hash(body), now, checked_project, row["note_id"]),
                 )
                 self._upsert_fts(connection, checked_project, row["note_id"], row["title"], body)
+                self._write_project_map(connection, checked_project)
                 connection.commit()
                 self._snapshot_project(checked_project, f"memory: restore {row['note_id']}")
                 self._append_audit("note.restored", project_id=checked_project, note_id=row["note_id"])

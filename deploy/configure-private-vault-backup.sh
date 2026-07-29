@@ -35,7 +35,14 @@ printf 'https://%s:%s@github.com\n' "${GITHUB_USER}" "${github_token}" | \
 unset github_token
 
 sudo -u memory-rpc -H git config --global credential.helper 'store --file ~/.git-credentials'
-sudo -u memory-rpc -H git config --global credential.useHttpPath true
+# GitHub authenticates an account at the host level.  The credential entry
+# intentionally has no repository path, so Git must not require one when it
+# looks up the stored token for the aggregate backup repository.
+sudo -u memory-rpc -H git config --global credential.useHttpPath false
+
+if ! sudo -u memory-rpc -H git ls-remote "${BACKUP_REMOTE}" >/dev/null; then
+  die "could not authenticate to the private backup remote; check the token's repository Contents read/write permission"
+fi
 
 sudo install -d -o root -g root -m 0755 /etc/research-memory
 printf 'MEMORY_DATA_DIR=%s\nMEMORY_BACKUP_REMOTE=%s\nMEMORY_BACKUP_BRANCH=%s\n' \

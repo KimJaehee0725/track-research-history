@@ -24,8 +24,8 @@ bash deploy/configure-private-vault-backup.sh
 ```
 
 도우미는 토큰을 `memory-rpc` 계정만 읽을 수 있는 Git credential store에 저장하고,
-15분마다 실행되는 `research-memory-vault-backup.timer`를 활성화한다. 첫 실행은 즉시
-수행한다.
+원격 인증을 즉시 확인한 뒤 15분마다 실행되는
+`research-memory-vault-backup.timer`를 활성화한다. 첫 실행은 즉시 수행한다.
 
 ## 상태 확인과 수동 동기화
 

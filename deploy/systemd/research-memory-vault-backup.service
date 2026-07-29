@@ -1,0 +1,16 @@
+[Unit]
+Description=Research Memory private Git vault backup
+Wants=network-online.target
+After=network-online.target
+ConditionPathExists=/etc/research-memory/vault-backup.env
+
+[Service]
+Type=oneshot
+User=memory-rpc
+Group=memory-rpc
+UMask=0077
+EnvironmentFile=/etc/research-memory/vault-backup.env
+ExecStart=/opt/research-memory/deploy/sync-memory-vaults.sh
+NoNewPrivileges=true
+PrivateTmp=true
+

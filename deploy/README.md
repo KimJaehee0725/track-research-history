@@ -106,6 +106,13 @@ text and never starts a shell or subprocess. Scope is fixed by the key's
 `--allow-project` and `--permission` arguments. The RPC account cannot make
 port forwards; use a separate administrator SSH account for the UI tunnel.
 
+## Private vault backup
+
+For a private offsite backup of all project Markdown in one `memory-vaults`
+branch, use [the private vault backup guide](../docs/private-vault-backup.md).
+The backup is intentionally separate from the source-code `main` branch and
+does not upload SSH keys, passwords, SQLite state, audit logs, or trash.
+
 Do not move this forced command into Docker by giving `memory-rpc` access to
 the Docker socket or `docker` group: that access is effectively host-root
 privilege. Keep the RPC account on the host with its limited forced command.

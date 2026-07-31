@@ -1071,7 +1071,8 @@ def ensure_git_repo(root: Path, branch: str = HUB_DEFAULT_BRANCH) -> None:
     root.mkdir(parents=True, exist_ok=True)
     if git_run(root, ["rev-parse", "--is-inside-work-tree"], check=False).returncode != 0:
         subprocess.run(["git", "init"], cwd=str(root), check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    if not git_current_branch(root):
+    has_head = git_run(root, ["rev-parse", "--verify", "HEAD"], check=False).returncode == 0
+    if not has_head or not git_current_branch(root):
         git_run(root, ["checkout", "-B", branch], check=False)
 
 

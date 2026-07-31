@@ -19,6 +19,7 @@ from pathlib import Path, PurePosixPath
 import re
 import shutil
 import sqlite3
+import stat
 import tempfile
 from typing import Any, Iterator
 import uuid
@@ -34,6 +35,7 @@ from .git_backup import GitBackupError, commit_project_snapshot, initialize_proj
 
 
 PROJECT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
+TRASH_ID_RE = re.compile(r"[A-Za-z0-9._-]{1,160}\Z")
 MAX_NOTE_BYTES = 5 * 1024 * 1024
 MAX_TITLE_CHARS = 256
 MAX_DESCRIPTION_CHARS = 4_000
@@ -64,12 +66,16 @@ def validate_note_path(value: str) -> str:
         raise ValidationError("note path must be a string")
     if not value or len(value) > 480 or "\x00" in value or "\\" in value:
         raise ValidationError("note path must be a short relative POSIX path")
+    raw_parts = value.split("/")
+    if any(part in {"", ".", ".."} for part in raw_parts):
+        raise ValidationError("note path cannot contain empty, '.' or '..' components")
     candidate = PurePosixPath(value)
     if candidate.is_absolute() or not value.endswith(".md"):
         raise ValidationError("note path must be a relative .md path")
-    if any(part in {"", ".", ".."} for part in candidate.parts):
-        raise ValidationError("note path cannot contain empty, '.' or '..' components")
-    return candidate.as_posix()
+    normalized = candidate.as_posix()
+    if normalized == PROJECT_MAP_NOTE_ID:
+        raise ValidationError(f"{PROJECT_MAP_NOTE_ID} is a reserved derived file")
+    return normalized
 
 
 def _text(value: str | None, label: str, maximum: int, *, required: bool = False) -> str:
@@ -158,7 +164,9 @@ class MemoryStore:
     """Own project Markdown vaults, metadata, FTS5 index, and recoverable trash."""
 
     def __init__(self, data_dir: str | Path, *, actor: str = "system") -> None:
-        self.data_dir = Path(data_dir).expanduser().resolve()
+        requested_data_dir = Path(data_dir).expanduser()
+        requested_data_dir.mkdir(parents=True, exist_ok=True)
+        self.data_dir = requested_data_dir.resolve()
         if not isinstance(actor, str) or not actor.strip() or any(
             character in actor for character in "\r\n\x00"
         ):
@@ -171,22 +179,44 @@ class MemoryStore:
         self.database_path = self.data_dir / "registry.sqlite3"
         self.lock_path = self.data_dir / ".store.lock"
         for directory in (
-            self.data_dir,
             self.projects_dir,
             self.audit_dir,
             self.trash_dir,
             self.backups_dir,
         ):
-            directory.mkdir(parents=True, exist_ok=True)
+            self._ensure_managed_directory(directory)
+        for managed_file in (self.database_path, self.lock_path):
+            if managed_file.is_symlink():
+                raise SecurityError(f"managed path cannot be a symlink: {managed_file.name}")
         self._fts_enabled = False
         with self._locked():
             self._initialize_database()
+
+    def _ensure_managed_directory(self, directory: Path) -> None:
+        """Create one service-owned root without following a pre-existing link."""
+
+        if directory.is_symlink():
+            raise SecurityError(f"managed directory cannot be a symlink: {directory.name}")
+        if directory.exists():
+            if not directory.is_dir():
+                raise SecurityError(f"managed path is not a directory: {directory.name}")
+        else:
+            directory.mkdir()
+        resolved = directory.resolve()
+        if resolved == self.data_dir or self.data_dir not in resolved.parents:
+            raise SecurityError(f"managed directory escapes data root: {directory.name}")
 
     @contextmanager
     def _locked(self) -> Iterator[None]:
         """Serialize filesystem and SQLite mutations across local processes."""
 
-        descriptor = os.open(self.lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        flags = os.O_CREAT | os.O_RDWR
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
+            descriptor = os.open(self.lock_path, flags, 0o600)
+        except OSError as exc:
+            raise SecurityError("store lock path is unsafe or unavailable") from exc
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX)
             yield
@@ -195,6 +225,8 @@ class MemoryStore:
             os.close(descriptor)
 
     def _connect(self) -> sqlite3.Connection:
+        if self.database_path.is_symlink():
+            raise SecurityError("registry database cannot be a symlink")
         connection = sqlite3.connect(self.database_path, timeout=30, isolation_level=None)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
@@ -250,6 +282,27 @@ class MemoryStore:
                 # Python builds without FTS5 still retain correct storage and
                 # use the small-vault substring fallback in ``search``.
                 self._fts_enabled = False
+            # ``project-map.md`` is derived state, never a user note.  Remove
+            # rows produced by older releases that briefly allowed the ID.
+            connection.execute(
+                "DELETE FROM notes WHERE note_id = ?",
+                (PROJECT_MAP_NOTE_ID,),
+            )
+            if self._fts_enabled:
+                connection.execute(
+                    "DELETE FROM notes_fts WHERE note_id = ?",
+                    (PROJECT_MAP_NOTE_ID,),
+                )
+            # Rebuild every active derived map at startup. Besides keeping the
+            # file synchronized after an upgrade, this replaces a legacy or
+            # externally modified map with trusted derived state.
+            active_projects = connection.execute(
+                "SELECT project_id FROM projects WHERE deleted_at IS NULL"
+            ).fetchall()
+            for row in active_projects:
+                project_id = str(row["project_id"])
+                if self._project_dir(project_id).is_dir():
+                    self._write_project_map(connection, project_id)
         finally:
             connection.close()
 
@@ -279,6 +332,96 @@ class MemoryStore:
                 break
             parent = parent.parent
         return path
+
+    @staticmethod
+    def _open_regular_file(root: Path, *parts: str) -> int:
+        """Open one root-relative regular file without following any symlink."""
+
+        if not parts or not hasattr(os, "O_NOFOLLOW"):
+            raise SecurityError("no-follow file access is unavailable")
+        for part in parts:
+            if (
+                not isinstance(part, str)
+                or part in {"", ".", ".."}
+                or "/" in part
+                or "\\" in part
+                or "\x00" in part
+            ):
+                raise SecurityError("managed file path contains an unsafe component")
+
+        directory_flags = (
+            os.O_RDONLY
+            | os.O_NOFOLLOW
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_DIRECTORY", 0)
+        )
+        file_flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+        directory_descriptors: list[int] = []
+        file_descriptor: int | None = None
+        try:
+            directory_descriptor = os.open(root, directory_flags)
+            directory_descriptors.append(directory_descriptor)
+            if not stat.S_ISDIR(os.fstat(directory_descriptor).st_mode):
+                raise SecurityError("managed file root is not a directory")
+            for part in parts[:-1]:
+                directory_descriptor = os.open(
+                    part,
+                    directory_flags,
+                    dir_fd=directory_descriptor,
+                )
+                directory_descriptors.append(directory_descriptor)
+                if not stat.S_ISDIR(os.fstat(directory_descriptor).st_mode):
+                    raise SecurityError("managed path component is not a directory")
+            file_descriptor = os.open(
+                parts[-1],
+                file_flags,
+                dir_fd=directory_descriptor,
+            )
+            file_status = os.fstat(file_descriptor)
+            if not stat.S_ISREG(file_status.st_mode):
+                raise SecurityError("managed note payload is not a regular file")
+            if file_status.st_size > MAX_NOTE_BYTES:
+                raise SecurityError("managed note payload exceeds the size limit")
+            result = file_descriptor
+            file_descriptor = None
+            return result
+        except FileNotFoundError:
+            raise
+        except OSError as exc:
+            raise SecurityError("managed file path is unsafe or unavailable") from exc
+        finally:
+            if file_descriptor is not None:
+                os.close(file_descriptor)
+            for descriptor in reversed(directory_descriptors):
+                os.close(descriptor)
+
+    @classmethod
+    def _read_regular_text(cls, root: Path, *parts: str) -> str:
+        descriptor = cls._open_regular_file(root, *parts)
+        with os.fdopen(descriptor, "r", encoding="utf-8") as stream:
+            return stream.read()
+
+    @staticmethod
+    def _assert_safe_project_tree(project_dir: Path) -> None:
+        """Reject project trees containing links before moving the tree."""
+
+        if project_dir.is_symlink():
+            raise SecurityError("project directory cannot be a symlink")
+        if not project_dir.is_dir():
+            raise NotFoundError("project directory was not found")
+
+        def fail_walk(exc: OSError) -> None:
+            raise SecurityError("project tree could not be inspected safely") from exc
+
+        for root, directories, files in os.walk(
+            project_dir,
+            topdown=True,
+            followlinks=False,
+            onerror=fail_walk,
+        ):
+            for name in directories + files:
+                if (Path(root) / name).is_symlink():
+                    raise SecurityError("project tree cannot contain symlinks")
 
     @staticmethod
     def _hash(body: str) -> str:
@@ -331,16 +474,102 @@ class MemoryStore:
             trash_id=row["trash_id"],
         )
 
+    @staticmethod
+    def _stored_trash_id(value: Any) -> str:
+        if not isinstance(value, str) or not TRASH_ID_RE.fullmatch(value):
+            raise SecurityError("stored trash identifier is unsafe")
+        return value
+
+    def _note_body_from_row(
+        self,
+        project_id: str,
+        project: sqlite3.Row,
+        row: sqlite3.Row,
+    ) -> str:
+        note_id = validate_note_path(str(row["note_id"]))
+        note_parts = PurePosixPath(note_id).parts
+        if row["deleted_at"] is not None:
+            trash_id = self._stored_trash_id(row["trash_id"])
+            return self._read_regular_text(self.trash_dir, trash_id, "note.md")
+        if project["deleted_at"] is not None:
+            trash_id = self._stored_trash_id(project["trash_id"])
+            return self._read_regular_text(
+                self.trash_dir,
+                trash_id,
+                "project",
+                "vault",
+                *note_parts,
+            )
+        return self._read_regular_text(
+            self._vault_dir(project_id),
+            *note_parts,
+        )
+
     def _append_audit(self, event: str, **details: Any) -> None:
         payload = {"at": _timestamp(), "actor": self.actor, "event": event, **details}
-        path = self.audit_dir / f"{payload['at'][:10]}.jsonl"
+        daily_name = f"{payload['at'][:10]}.jsonl"
         encoded = (json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8")
-        descriptor = os.open(path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
+        normal_flags = os.O_APPEND | os.O_CREAT | os.O_WRONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            normal_flags |= os.O_NOFOLLOW
+
+        directory_flags = (
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
         try:
-            os.write(descriptor, encoded)
-            os.fsync(descriptor)
+            audit_descriptor = os.open(self.audit_dir, directory_flags)
+        except OSError:
+            return
+
+        def write_record(filename: str, flags: int) -> bool:
+            descriptor: int | None = None
+            try:
+                descriptor = os.open(
+                    filename,
+                    flags,
+                    0o600,
+                    dir_fd=audit_descriptor,
+                )
+                remaining = memoryview(encoded)
+                while remaining:
+                    written = os.write(descriptor, remaining)
+                    if written <= 0:
+                        raise OSError("audit write made no progress")
+                    remaining = remaining[written:]
+                os.fsync(descriptor)
+                return True
+            except OSError:
+                return False
+            finally:
+                if descriptor is not None:
+                    try:
+                        os.close(descriptor)
+                    except OSError:
+                        pass
+
+        try:
+            if write_record(daily_name, normal_flags):
+                return
+
+            # Mutations have usually committed before their audit event is
+            # emitted. A poisoned daily path must not turn a successful
+            # mutation into a false failure. A unique O_EXCL fallback retains
+            # the event without following the unsafe path.
+            fallback_name = (
+                f"fallback-{payload['at'][:10]}-{uuid.uuid4().hex}.jsonl"
+            )
+            fallback_flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+            if hasattr(os, "O_NOFOLLOW"):
+                fallback_flags |= os.O_NOFOLLOW
+            write_record(fallback_name, fallback_flags)
         finally:
-            os.close(descriptor)
+            try:
+                os.close(audit_descriptor)
+            except OSError:
+                pass
 
     def _snapshot_project(self, project_id: str, event: str) -> None:
         """Make a best-effort local Git snapshot when this project enabled it.
@@ -420,7 +649,18 @@ class MemoryStore:
                 label = str(row["title"]).replace("[", "").replace("]", "").replace("|", " ")
                 lines.append(f"- [[{target}|{label}]]")
         lines.append("")
-        self._atomic_write(self._vault_dir(project_id) / PROJECT_MAP_NOTE_ID, "\n".join(lines))
+        vault = self._vault_dir(project_id)
+        body = "\n".join(lines)
+        try:
+            existing = self._read_regular_text(vault, PROJECT_MAP_NOTE_ID)
+        except (
+            FileNotFoundError,
+            UnicodeDecodeError,
+            SecurityError,
+        ):
+            existing = None
+        if existing != body:
+            self._atomic_write(vault / PROJECT_MAP_NOTE_ID, body)
 
     def rebuild_project_map(self, project_id: str) -> None:
         """Refresh one project's derived Obsidian map after a deployment."""
@@ -493,16 +733,26 @@ class MemoryStore:
         """
 
         vault = self._vault_dir(project_id)
+        if vault.is_symlink():
+            raise SecurityError("project vault cannot be a symlink")
         if not vault.is_dir():
             return
         seen: set[str] = set()
         for path in vault.rglob("*.md"):
-            if path.is_symlink() or not path.is_file():
+            if path.is_symlink():
                 continue
             try:
                 note_id = validate_note_path(path.relative_to(vault).as_posix())
-                body = path.read_text(encoding="utf-8")
-            except (OSError, UnicodeDecodeError, ValidationError):
+                body = self._read_regular_text(
+                    vault,
+                    *PurePosixPath(note_id).parts,
+                )
+            except (
+                FileNotFoundError,
+                UnicodeDecodeError,
+                ValidationError,
+                SecurityError,
+            ):
                 continue
             if note_id == PROJECT_MAP_NOTE_ID:
                 continue
@@ -629,10 +879,11 @@ class MemoryStore:
             try:
                 connection.execute("BEGIN IMMEDIATE")
                 row = self._active_project_row(connection, checked)
+                project_dir = self._project_dir(checked)
+                self._assert_safe_project_tree(project_dir)
                 trash_id = f"project-{checked}-{uuid.uuid4().hex[:16]}"
                 trash_root = self.trash_dir / trash_id
                 trash_root.mkdir(mode=0o700)
-                project_dir = self._project_dir(checked)
                 self._snapshot_project(checked, "memory: project moved to trash")
                 os.replace(project_dir, trash_root / "project")
                 now = _timestamp()
@@ -660,10 +911,14 @@ class MemoryStore:
                 ).fetchone()
                 if row is None or row["deleted_at"] is None or not row["trash_id"]:
                     raise NotFoundError("deleted project was not found")
-                source = self.trash_dir / row["trash_id"] / "project"
+                stored_trash_id = self._stored_trash_id(row["trash_id"])
+                source = self.trash_dir / stored_trash_id / "project"
                 destination = self._project_dir(checked)
+                if source.is_symlink():
+                    raise SecurityError("project trash payload cannot be a symlink")
                 if not source.is_dir():
                     raise NotFoundError("project trash payload was not found")
+                self._assert_safe_project_tree(source)
                 if destination.exists():
                     raise ConflictError("an active project directory already exists")
                 os.replace(source, destination)
@@ -805,10 +1060,13 @@ class MemoryStore:
                     raise NotFoundError("note was not found")
                 if row["deleted_at"] is not None:
                     return self._note_from_row(row)
-                path = self._note_file(checked_project, checked_note)
-                if not path.is_file():
+                try:
+                    body = self._read_regular_text(
+                        self._vault_dir(checked_project),
+                        *PurePosixPath(checked_note).parts,
+                    )
+                except FileNotFoundError:
                     raise NotFoundError("note file was not found")
-                body = path.read_text(encoding="utf-8")
                 connection.commit()
                 return self._note_from_row(row, body)
             except Exception:
@@ -839,8 +1097,16 @@ class MemoryStore:
                 rows = connection.execute(query, (checked_project,)).fetchall()
                 records: list[NoteRecord] = []
                 for row in rows:
-                    if row["deleted_at"] is None and not self._note_file(checked_project, row["note_id"]).is_file():
-                        continue
+                    if row["deleted_at"] is None:
+                        try:
+                            descriptor = self._open_regular_file(
+                                self._vault_dir(checked_project),
+                                *PurePosixPath(str(row["note_id"])).parts,
+                            )
+                        except FileNotFoundError:
+                            continue
+                        else:
+                            os.close(descriptor)
                     records.append(self._note_from_row(row))
                 connection.commit()
                 return records
@@ -918,7 +1184,9 @@ class MemoryStore:
             checked_note = validate_note_path(note_id)
         else:
             checked_note = None
-        if trash_id is not None and (not isinstance(trash_id, str) or not re.fullmatch(r"[A-Za-z0-9._-]{1,160}", trash_id)):
+        if trash_id is not None and (
+            not isinstance(trash_id, str) or not TRASH_ID_RE.fullmatch(trash_id)
+        ):
             raise ValidationError("trash_id contains unsupported characters")
         if checked_note is None and trash_id is None:
             raise ValidationError("note_id or trash_id is required")
@@ -940,15 +1208,21 @@ class MemoryStore:
                 if row is None or not row["trash_id"]:
                     raise NotFoundError("deleted note was not found")
                 self._expected_revision(expected_revision, int(row["revision"]))
-                source = self.trash_dir / row["trash_id"] / "note.md"
+                stored_trash_id = self._stored_trash_id(row["trash_id"])
+                source = self.trash_dir / stored_trash_id / "note.md"
                 destination = self._note_file(checked_project, row["note_id"])
-                if not source.is_file():
+                try:
+                    body = self._read_regular_text(
+                        self.trash_dir,
+                        stored_trash_id,
+                        "note.md",
+                    )
+                except FileNotFoundError:
                     raise NotFoundError("note trash payload was not found")
                 if destination.exists():
                     raise ConflictError("an active note file already exists")
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                os.replace(source, destination)
-                body = destination.read_text(encoding="utf-8")
+                self._atomic_write(destination, body)
+                source.unlink(missing_ok=True)
                 now = _timestamp()
                 revision = int(row["revision"]) + 1
                 connection.execute(
@@ -1022,41 +1296,29 @@ class MemoryStore:
                     needle = checked_query.casefold()
                     rows = []
                     for row in candidates:
-                        if row["deleted_at"] is not None:
-                            path = self.trash_dir / str(row["trash_id"] or "") / "note.md"
-                        elif project["deleted_at"] is not None and project["trash_id"]:
-                            path = (
-                                self.trash_dir
-                                / project["trash_id"]
-                                / "project"
-                                / "vault"
-                                / row["note_id"]
+                        try:
+                            body = self._note_body_from_row(
+                                checked_project,
+                                project,
+                                row,
                             )
-                        else:
-                            path = self._note_file(checked_project, row["note_id"])
-                        if not path.is_file():
+                        except FileNotFoundError:
                             continue
-                        body = path.read_text(encoding="utf-8")
                         if needle in (row["title"] + "\n" + body).casefold():
                             rows.append(row)
                             if len(rows) >= limit:
                                 break
                 records: list[NoteRecord] = []
                 for row in rows[:limit]:
-                    if row["deleted_at"] is not None:
-                        path = self.trash_dir / str(row["trash_id"] or "") / "note.md"
-                    elif project["deleted_at"] is not None and project["trash_id"]:
-                        path = (
-                            self.trash_dir
-                            / project["trash_id"]
-                            / "project"
-                            / "vault"
-                            / row["note_id"]
+                    try:
+                        body = self._note_body_from_row(
+                            checked_project,
+                            project,
+                            row,
                         )
-                    else:
-                        path = self._note_file(checked_project, row["note_id"])
-                    if path.is_file():
-                        records.append(self._note_from_row(row, path.read_text(encoding="utf-8")))
+                    except FileNotFoundError:
+                        continue
+                    records.append(self._note_from_row(row, body))
                 connection.commit()
                 return records
             except Exception:

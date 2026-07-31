@@ -25,6 +25,10 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from research_memory.store import MemoryStore
+from research_memory.web_security import (
+    mutation_source_is_same_origin,
+    request_host_is_loopback,
+)
 
 
 DEFAULT_DATA_DIR = "/srv/research-memory"
@@ -214,6 +218,33 @@ def _render_page(
 </body>
 </html>"""
     return HTMLResponse(document, status_code=status_code)
+
+
+@app.middleware("http")
+async def _same_origin_mutation_guard(request: Request, call_next: Any) -> Any:
+    """Block cross-site form posts to an SSH-forwarded loopback service."""
+
+    if not request_host_is_loopback(request.headers.get("host")):
+        return _render_page(
+            "Invalid host",
+            "<h2>Invalid host</h2>"
+            "<p>Open this service through a localhost or loopback SSH forward.</p>",
+            status_code=400,
+        )
+    if request.method.upper() not in {"GET", "HEAD", "OPTIONS"}:
+        if not mutation_source_is_same_origin(
+            str(request.base_url),
+            origin=request.headers.get("origin"),
+            referer=request.headers.get("referer"),
+            fetch_site=request.headers.get("sec-fetch-site"),
+        ):
+            return _render_page(
+                "Cross-site request blocked",
+                "<h2>Cross-site request blocked</h2>"
+                "<p>Reload this page from the loopback Research Memory UI and retry.</p>",
+                status_code=403,
+            )
+    return await call_next(request)
 
 
 def _storage_problem(exc: Exception) -> HTTPException:

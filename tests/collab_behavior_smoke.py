@@ -872,6 +872,12 @@ class CollabBehaviorSmokeTests(unittest.TestCase):
         project.mkdir()
         subprocess.run(["git", "-C", str(project), "init"], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         subprocess.run(["git", "init", "--bare", str(remote)], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        subprocess.run(
+            ["git", "-C", str(remote), "symbolic-ref", "HEAD", "refs/heads/master"],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
         cli = HistoryCLI(project)
 
         cli.run("bootstrap")

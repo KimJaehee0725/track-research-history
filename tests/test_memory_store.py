@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 import sys
@@ -18,9 +19,11 @@ from research_memory import (  # noqa: E402
     ConflictError,
     JsonRpcDispatcher,
     MemoryStore,
+    NotFoundError,
     SecurityError,
     ValidationError,
     dispatch_json_line,
+    validate_note_path,
 )
 
 
@@ -100,10 +103,147 @@ class MemoryStoreTests(unittest.TestCase):
         self.assertGreater(self.store.get_note("alienlm", "notes/direct.md").revision, note.revision)
 
     def test_unsafe_paths_are_rejected_before_file_access(self) -> None:
-        for note_id in ("../outside.md", "/tmp/outside.md", "notes/../outside.md", "notes\\outside.md"):
+        for note_id in (
+            "../outside.md",
+            "/tmp/outside.md",
+            "notes/../outside.md",
+            "notes\\outside.md",
+            "./note.md",
+            "notes//note.md",
+            "notes/./note.md",
+        ):
             with self.subTest(note_id=note_id), self.assertRaises((ValidationError, SecurityError)):
                 self.store.create_note("alienlm", note_id, "Bad", "body")
         self.assertFalse((Path(self.temporary.name) / "outside.md").exists())
+
+    def test_managed_service_directories_cannot_be_symlinks(self) -> None:
+        with TemporaryDirectory() as root_name, TemporaryDirectory() as external_name:
+            root = Path(root_name)
+            external = Path(external_name)
+            (root / "projects").symlink_to(external, target_is_directory=True)
+            with self.assertRaises(SecurityError):
+                MemoryStore(root)
+            self.assertEqual(list(external.iterdir()), [])
+
+    def test_audit_symlink_uses_safe_fallback_without_false_failure(self) -> None:
+        with TemporaryDirectory() as root_name, TemporaryDirectory() as external_name:
+            root = Path(root_name)
+            external = Path(external_name) / "outside.txt"
+            external.write_text("sentinel\n", encoding="utf-8")
+            audit = root / "audit"
+            audit.mkdir()
+            day = datetime.now(timezone.utc).date().isoformat()
+            (audit / f"{day}.jsonl").symlink_to(external)
+
+            store = MemoryStore(root)
+            created = store.create_project("demo")
+
+            self.assertEqual(created.project_id, "demo")
+            self.assertEqual(external.read_text(encoding="utf-8"), "sentinel\n")
+            fallbacks = list(audit.glob("fallback-*.jsonl"))
+            self.assertEqual(len(fallbacks), 1)
+            self.assertIn(
+                '"event": "project.created"',
+                fallbacks[0].read_text(encoding="utf-8"),
+            )
+
+    def test_project_map_is_reserved_derived_state(self) -> None:
+        with self.assertRaisesRegex(ValidationError, "reserved"):
+            self.store.create_note(
+                "alienlm",
+                "project-map.md",
+                "User-controlled map",
+                "# This must not replace the derived project map",
+            )
+        with self.assertRaisesRegex(ValidationError, "reserved"):
+            validate_note_path("project-map.md")
+
+    def test_startup_regenerates_derived_project_map(self) -> None:
+        map_path = (
+            Path(self.temporary.name)
+            / "projects"
+            / "alienlm"
+            / "vault"
+            / "project-map.md"
+        )
+        map_path.write_text("# USER CONTROLLED LEGACY MAP\n", encoding="utf-8")
+
+        MemoryStore(self.temporary.name)
+
+        rebuilt = map_path.read_text(encoding="utf-8")
+        self.assertNotIn("USER CONTROLLED LEGACY MAP", rebuilt)
+        self.assertIn("type: project-map", rebuilt)
+
+    def test_project_delete_rejects_symlink_in_vault_tree(self) -> None:
+        with TemporaryDirectory() as external_name:
+            external = Path(external_name) / "secret.md"
+            external.write_text("secret", encoding="utf-8")
+            self.store.create_note("alienlm", "notes/link.md", "Link", "safe")
+            note_path = (
+                Path(self.temporary.name)
+                / "projects"
+                / "alienlm"
+                / "vault"
+                / "notes"
+                / "link.md"
+            )
+            note_path.unlink()
+            note_path.symlink_to(external)
+
+            with self.assertRaises(SecurityError):
+                self.store.delete_project("alienlm")
+
+            self.assertEqual(self.store.get_project("alienlm").project_id, "alienlm")
+            self.assertEqual(external.read_text(encoding="utf-8"), "secret")
+
+    def test_deleted_project_search_and_restore_reject_symlink_payload(self) -> None:
+        with TemporaryDirectory() as external_name:
+            external = Path(external_name) / "secret.md"
+            external.write_text("DELETED_PROJECT_SECRET", encoding="utf-8")
+            self.store.create_note("alienlm", "notes/link.md", "Link", "safe")
+            deleted = self.store.delete_project("alienlm")
+            payload = (
+                Path(self.temporary.name)
+                / "trash"
+                / str(deleted.trash_id)
+                / "project"
+                / "vault"
+                / "notes"
+                / "link.md"
+            )
+            payload.unlink()
+            payload.symlink_to(external)
+
+            with self.assertRaises(SecurityError):
+                self.store.search(
+                    "alienlm",
+                    "DELETED_PROJECT_SECRET",
+                    include_deleted=True,
+                )
+            with self.assertRaises(SecurityError):
+                self.store.restore_project("alienlm")
+            self.assertFalse(
+                (Path(self.temporary.name) / "projects" / "alienlm").exists()
+            )
+
+    def test_note_restore_rejects_symlink_payload(self) -> None:
+        with TemporaryDirectory() as external_name:
+            external = Path(external_name) / "secret.md"
+            external.write_text("RESTORE_SECRET", encoding="utf-8")
+            self.store.create_note("alienlm", "notes/link.md", "Link", "safe")
+            deleted = self.store.delete_note("alienlm", "notes/link.md")
+            payload = (
+                Path(self.temporary.name)
+                / "trash"
+                / str(deleted.trash_id)
+                / "note.md"
+            )
+            payload.unlink()
+            payload.symlink_to(external)
+
+            with self.assertRaises(SecurityError):
+                self.store.restore_note("alienlm", trash_id=deleted.trash_id)
+            self.assertEqual(self.store.list_notes("alienlm"), [])
 
     def test_project_trash_preserves_every_note(self) -> None:
         self.store.create_note("alienlm", "notes/keep.md", "Keep", "important")
@@ -173,6 +313,122 @@ class MemoryStoreTests(unittest.TestCase):
             }
         )
         self.assertTrue(normalized["include_deleted"])
+
+    def test_embedded_rpc_rejects_string_boolean_and_limit(self) -> None:
+        dispatcher = JsonRpcDispatcher(self.store)
+        for request in (
+            {
+                "version": 1,
+                "op": "project.init",
+                "project": "string-false",
+                "params": {"enable_git": "false"},
+            },
+            {
+                "version": 1,
+                "op": "note.search",
+                "project": "alienlm",
+                "params": {"query": "x", "limit": "20"},
+            },
+            {
+                "version": 1,
+                "op": "note.list",
+                "project": "alienlm",
+                "params": {"limit": "1"},
+            },
+        ):
+            with self.subTest(request=request), self.assertRaises(ValidationError):
+                dispatcher.dispatch(request)
+        self.assertFalse(
+            Path(self.temporary.name, "projects", "string-false").exists()
+        )
+
+    def test_embedded_rpc_only_creates_on_not_found(self) -> None:
+        class FailingStore:
+            def __init__(self) -> None:
+                self.create_called = False
+
+            def get_note(self, *_: object, **__: object) -> object:
+                raise ConflictError("storage conflict")
+
+            def create_note(self, *_: object, **__: object) -> object:
+                self.create_called = True
+                raise AssertionError("create_note must not be called")
+
+        store = FailingStore()
+        dispatcher = JsonRpcDispatcher(store)  # type: ignore[arg-type]
+        with self.assertRaises(ConflictError):
+            dispatcher.dispatch(
+                {
+                    "version": 1,
+                    "op": "note.write",
+                    "project": "alienlm",
+                    "params": {"path": "notes/rpc.md", "content": "body"},
+                }
+            )
+        self.assertFalse(store.create_called)
+
+    def test_embedded_rpc_honors_note_list_limit(self) -> None:
+        for index in range(3):
+            self.store.create_note(
+                "alienlm",
+                f"notes/list-{index}.md",
+                f"List {index}",
+                "body",
+            )
+        response = JsonRpcDispatcher(self.store).dispatch(
+            {
+                "version": 1,
+                "op": "note.list",
+                "project": "alienlm",
+                "params": {"limit": 1},
+            }
+        )
+        self.assertEqual(len(response["result"]), 1)
+
+    def test_embedded_rpc_sanitizes_unexpected_store_failure(self) -> None:
+        class FailingStore:
+            def __init__(self, failure: Exception) -> None:
+                self.failure = failure
+
+            def get_note(self, *_: object, **__: object) -> object:
+                raise self.failure
+
+        for failure in (
+            OSError("/private/server/secret"),
+            SecurityError("unsafe server symlink"),
+        ):
+            response = json.loads(
+                dispatch_json_line(
+                    JsonRpcDispatcher(FailingStore(failure)),  # type: ignore[arg-type]
+                    json.dumps(
+                        {
+                            "version": 1,
+                            "op": "note.read",
+                            "project": "alienlm",
+                            "params": {"path": "notes/rpc.md"},
+                        }
+                    ),
+                )
+            )
+            with self.subTest(failure=failure):
+                self.assertEqual(response["error"]["code"], "store_error")
+                self.assertNotIn(str(failure), json.dumps(response))
+
+    def test_embedded_rpc_reports_not_found_separately(self) -> None:
+        response = json.loads(
+            dispatch_json_line(
+                JsonRpcDispatcher(self.store),
+                json.dumps(
+                    {
+                        "version": 1,
+                        "op": "note.read",
+                        "project": "alienlm",
+                        "params": {"path": "notes/missing.md"},
+                    }
+                ),
+            )
+        )
+        self.assertEqual(response["error"]["code"], "not_found")
 
 
 if __name__ == "__main__":

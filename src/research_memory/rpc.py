@@ -8,10 +8,18 @@ or a network dependency.
 from __future__ import annotations
 
 import json
-from typing import Any, Mapping
+from collections.abc import Mapping
+from typing import Any
 
 from .authz import ProjectAuthorizer
-from .errors import AuthorizationError, MemoryError, ValidationError
+from .errors import (
+    AlreadyExistsError,
+    AuthorizationError,
+    ConflictError,
+    MemoryError,
+    NotFoundError,
+    ValidationError,
+)
 from .store import MemoryStore
 
 
@@ -37,6 +45,19 @@ class JsonRpcDispatcher:
             raise ValidationError(f"{name} must be a boolean")
         return value
 
+    @staticmethod
+    def _limit(
+        params: Mapping[str, Any], name: str = "limit", default: int = 20
+    ) -> int:
+        value = params.get(name, default)
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or not 1 <= value <= 1000
+        ):
+            raise ValidationError(f"{name} must be an integer between 1 and 1000")
+        return value
+
     def dispatch(self, request: Mapping[str, Any]) -> dict[str, Any]:
         if request.get("version") != 1:
             raise ValidationError("version must be 1")
@@ -49,21 +70,40 @@ class JsonRpcDispatcher:
             raise ValidationError("project is required")
         if op == "project.list":
             self._authorize(None, "list")
-            records = self.store.list_projects(include_deleted=self._bool(params, "include_deleted"))
-            return {"ok": True, "result": [record.to_dict() for record in records if self.authorizer.can_access(self.actor, record.project_id)]}
+            records = self.store.list_projects(
+                include_deleted=self._bool(params, "include_deleted")
+            )
+            return {
+                "ok": True,
+                "result": [
+                    record.to_dict()
+                    for record in records
+                    if self.authorizer.can_access(self.actor, record.project_id)
+                ],
+            }
         assert isinstance(project, str)
         if op == "project.init":
             self._authorize(project, "write")
-            record = self.store.create_project(project, title=params.get("title"), description=params.get("description"), enable_git=bool(params.get("enable_git", False)))
+            record = self.store.create_project(
+                project,
+                title=params.get("title"),
+                description=params.get("description"),
+                enable_git=self._bool(params, "enable_git"),
+            )
         elif op == "note.list":
             self._authorize(project, "read")
-            records = self.store.list_notes(
-                project, include_deleted=self._bool(params, "include_deleted")
-            )
             prefix = params.get("prefix")
             if prefix is not None and not isinstance(prefix, str):
                 raise ValidationError("prefix must be a string")
-            record = [item.to_dict() for item in records if prefix is None or item.note_id.startswith(prefix)]
+            limit = self._limit(params, default=100)
+            records = self.store.list_notes(
+                project, include_deleted=self._bool(params, "include_deleted")
+            )
+            record = [
+                item.to_dict()
+                for item in records
+                if prefix is None or item.note_id.startswith(prefix)
+            ][:limit]
             return {"ok": True, "result": record}
         elif op == "note.read":
             self._authorize(project, "read")
@@ -79,16 +119,34 @@ class JsonRpcDispatcher:
                 raise ValidationError("path and content are required strings")
             try:
                 old = self.store.get_note(project, path)
-            except MemoryError:
-                record = self.store.create_note(project, path, str(params.get("title") or path), content, params.get("if_revision", 0))
+            except NotFoundError:
+                record = self.store.create_note(
+                    project,
+                    path,
+                    str(params.get("title") or path),
+                    content,
+                    params.get("if_revision", 0),
+                )
             else:
-                record = self.store.update_note(project, path, str(params.get("title") or old.title), content, params.get("if_revision"))
+                record = self.store.update_note(
+                    project,
+                    path,
+                    str(params.get("title") or old.title),
+                    content,
+                    params.get("if_revision"),
+                )
         elif op == "note.delete":
             self._authorize(project, "write")
-            record = self.store.delete_note(project, str(params.get("path", "")), params.get("if_revision"))
+            record = self.store.delete_note(
+                project, str(params.get("path", "")), params.get("if_revision")
+            )
         elif op == "note.restore":
             self._authorize(project, "write")
-            record = self.store.restore_note(project, trash_id=str(params.get("trash_id", "")), expected_revision=params.get("if_revision"))
+            record = self.store.restore_note(
+                project,
+                trash_id=str(params.get("trash_id", "")),
+                expected_revision=params.get("if_revision"),
+            )
         elif op == "note.search":
             self._authorize(project, "read")
             query = params.get("query")
@@ -97,7 +155,7 @@ class JsonRpcDispatcher:
             records = self.store.search(
                 project,
                 query,
-                limit=int(params.get("limit", 20)),
+                limit=self._limit(params),
                 include_deleted=self._bool(params, "include_deleted"),
             )
             return {"ok": True, "result": [item.to_dict() for item in records]}
@@ -116,8 +174,34 @@ def dispatch_json_line(dispatcher: JsonRpcDispatcher, line: str) -> str:
         response = dispatcher.dispatch(request)
     except AuthorizationError as exc:
         response = {"ok": False, "error": {"code": "forbidden", "message": str(exc)}}
-    except MemoryError as exc:
-        response = {"ok": False, "error": {"code": "invalid_request", "message": str(exc)}}
+    except NotFoundError as exc:
+        response = {"ok": False, "error": {"code": "not_found", "message": str(exc)}}
+    except (AlreadyExistsError, ConflictError) as exc:
+        response = {"ok": False, "error": {"code": "conflict", "message": str(exc)}}
+    except ValidationError as exc:
+        response = {
+            "ok": False,
+            "error": {"code": "invalid_request", "message": str(exc)},
+        }
+    except MemoryError:
+        response = {
+            "ok": False,
+            "error": {
+                "code": "store_error",
+                "message": "The memory store could not complete this request",
+            },
+        }
     except (TypeError, ValueError) as exc:
-        response = {"ok": False, "error": {"code": "invalid_request", "message": str(exc)}}
+        response = {
+            "ok": False,
+            "error": {"code": "invalid_request", "message": str(exc)},
+        }
+    except Exception:
+        response = {
+            "ok": False,
+            "error": {
+                "code": "store_error",
+                "message": "The memory store could not complete this request",
+            },
+        }
     return json.dumps(response, ensure_ascii=False, separators=(",", ":"))

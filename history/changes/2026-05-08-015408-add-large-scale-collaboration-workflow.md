@@ -1,3 +1,11 @@
+---
+type: change
+title: "Change - Add large-scale collaboration workflow"
+date: "2026-05-08 01:54 +0900"
+status: completed
+tags: [history, change]
+agent: codex
+---
 # Change - Add large-scale collaboration workflow
 
 Date: 2026-05-08 01:54 +0900

@@ -1,3 +1,11 @@
+---
+type: change
+title: "Change - BM25 검색을 markdown-aware virtual chunk로 전환"
+date: "2026-05-08 19:14 +0900"
+status: completed
+tags: [history, change]
+agent: codex
+---
 # Change - BM25 검색을 markdown-aware virtual chunk로 전환
 
 Date: 2026-05-08 19:14 +0900

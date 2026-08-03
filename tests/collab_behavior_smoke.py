@@ -190,6 +190,38 @@ class CollabBehaviorSmokeTests(unittest.TestCase):
         lint = cli.run("lint", "--strict").stdout
         self.assertIn("Summary: errors=0 warnings=0", lint)
 
+    def test_obsidian_project_map_links_repo_local_history(self) -> None:
+        root, cli = self.with_cli()
+        cli.run("bootstrap")
+
+        self.assertEqual(".obsidian/\n", (root / "history" / ".gitignore").read_text(encoding="utf-8"))
+        initial_map = (root / "history" / "PROJECT_MAP.md").read_text(encoding="utf-8")
+        self.assertIn("[[CONTEXT|Project Context]]", initial_map)
+        self.assertIn("[[INDEX|History Index]]", initial_map)
+
+        record = cli.emitted_path(
+            cli.run(
+                "change",
+                "--title",
+                "Obsidian map smoke",
+                "--why",
+                "Need portable navigation across repository-local notes.",
+                "--how",
+                "Generate project-relative wikilinks.",
+                "--no-git-status",
+            )
+        )
+        target = record.relative_to(root / "history").with_suffix("").as_posix()
+        project_map = (root / "history" / "PROJECT_MAP.md").read_text(encoding="utf-8")
+
+        self.assertIn(f"[[{target}|Change - Obsidian map smoke]]", project_map)
+        self.assertNotIn("/tmp/", project_map)
+        self.assertNotIn("PROJECT_MAP|", project_map)
+        self.assertEqual("history/PROJECT_MAP.md\n", cli.run("obsidian-map").stdout)
+
+        lint = cli.run("lint", "--strict").stdout
+        self.assertIn("Summary: errors=0 warnings=0", lint)
+
     def test_lint_reports_broken_wikilink_as_error(self) -> None:
         root, cli = self.with_cli()
         cli.run("bootstrap")
@@ -852,103 +884,6 @@ class CollabBehaviorSmokeTests(unittest.TestCase):
         self.assertIn(marker, search)
         self.assertIn("heading=Second Section", search)
         self.assertRegex(search, re.compile(r"location=chunk [2-9][0-9]*/|location=chunk [2-9]/"))
-
-    def test_hub_status_without_config_is_readable(self) -> None:
-        _, cli = self.with_cli()
-
-        status = cli.run("hub", "status").stdout
-
-        self.assertIn("no hub config", status)
-        self.assertIn("hub client-init", status)
-
-    def test_hub_submit_pushes_project_history_to_git_remote(self) -> None:
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        base = Path(tmp.name)
-        project = base / "project"
-        remote = base / "history-hub.git"
-        hub_path = base / "hub-cache"
-        clone = base / "hub-clone"
-        project.mkdir()
-        subprocess.run(["git", "-C", str(project), "init"], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        subprocess.run(["git", "init", "--bare", str(remote)], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        subprocess.run(
-            ["git", "-C", str(remote), "symbolic-ref", "HEAD", "refs/heads/master"],
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        cli = HistoryCLI(project)
-
-        cli.run("bootstrap")
-        marker = "HUB_ROUNDTRIP_RECALL_MARKER"
-        cli.run(
-            "change",
-            "--title",
-            "Hub roundtrip smoke",
-            "--why",
-            f"Need private remote hub sync with {marker}.",
-            "--how",
-            "Copy project history into the configured hub project mirror.",
-            "--no-git-status",
-        )
-        cli.run(
-            "hub",
-            "client-init",
-            "--project",
-            "demo-project",
-            "--remote",
-            str(remote),
-            "--hub-path",
-            str(hub_path),
-        )
-
-        submit = cli.run("hub", "submit").stdout
-
-        self.assertIn("Project: demo-project", submit)
-        self.assertIn("Pushed: yes", submit)
-        subprocess.run(
-            ["git", "clone", "-b", "main", str(remote), str(clone)],
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        mirrored_changes = list((clone / "history" / "projects" / "demo-project" / "changes").glob("*.md"))
-        self.assertTrue(mirrored_changes)
-        self.assertTrue((clone / "history" / "projects" / "demo-project" / "PROJECT.md").exists())
-        self.assertTrue(any(marker in path.read_text(encoding="utf-8") for path in mirrored_changes))
-
-        recall = cli.run("hub", "recall", marker, "--no-sync", "--no-variants").stdout
-        self.assertIn(marker, recall)
-        self.assertIn("history/projects/demo-project/changes/", recall)
-
-    def test_hub_submit_failure_writes_outbox_marker(self) -> None:
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        base = Path(tmp.name)
-        project = base / "project"
-        project.mkdir()
-        cli = HistoryCLI(project)
-        cli.run("bootstrap")
-        cli.run(
-            "hub",
-            "client-init",
-            "--project",
-            "failing-project",
-            "--remote",
-            str(base / "missing-remote.git"),
-            "--hub-path",
-            str(base / "hub-cache"),
-        )
-
-        proc = cli.run("hub", "submit", check=False)
-
-        self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        outbox = list((project / "history" / "outbox" / "hub").glob("*.md"))
-        self.assertEqual(1, len(outbox))
-        text = outbox[0].read_text(encoding="utf-8")
-        self.assertIn("Hub submit failed - failing-project", text)
-        self.assertIn("pending-retry", text)
 
 
 if __name__ == "__main__":

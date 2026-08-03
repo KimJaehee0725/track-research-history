@@ -5,7 +5,9 @@ Use this reference when deciding where to store or find project memory.
 ## Files
 
 - `history/CONTEXT.md`: durable project overview. Keep it short and current. Use it for goals, architecture map, active decisions, open questions, and next steps.
-- `history/INDEX.md`: generated navigation index. Rebuild with `history.py index`.
+- `history/INDEX.md`: generated text navigation index. Rebuild with `history.py index`.
+- `history/PROJECT_MAP.md`: generated Obsidian entry page with portable wikilinks. Rebuild with `history.py obsidian-map` or `history.py index`.
+- `history/.gitignore`: ignores per-user `.obsidian/` UI state while keeping all markdown tracked.
 - `history/README.md`: human-readable map of the history folder.
 - `history/daily/YYYY-MM-DD.md`: chronological log for the day. The script links records here automatically.
 - `history/changes/YYYY-MM-DD-HHMMSS-slug.md`: code or artifact change record.
@@ -23,9 +25,6 @@ Use this reference when deciding where to store or find project memory.
 - `history/archive/inbox/YYYY-MM/`: accepted inbox summaries after they have been promoted and archived.
 - `history/archive/daily/YYYY-MM/`: older daily logs moved out of the active daily folder.
 - `history/archive/sessions/YYYY-MM/`: older session notes moved out of the active sessions folder.
-- `history/hub.json`: project-local hub sync config. It stores project id, private Git remote, branch, local hub clone path, and archive inclusion policy. Do not store tokens in this file.
-- `history/outbox/hub/*.md`: retry markers written when hub clone, auth, network, or push fails.
-- Hub repo only: `history/projects/<project>/PROJECT.md` plus mirrored project records such as `changes/`, `decisions/`, `experiments/`, `handoffs/`, `capsules/`, `tasks/`, and `inbox/`.
 
 ## Record Quality
 
@@ -63,6 +62,8 @@ Collaboration records also include frontmatter fields such as `task`, `workstrea
 
 Use wiki links only when they point to durable history notes. Prefer unambiguous note names or explicit paths such as `[[decisions/0001-example]]`.
 
+Open `history/` itself as the Obsidian vault, then use `PROJECT_MAP.md` as its start page. Generated links are relative to that folder, so the same graph works in every clone. Keep `.obsidian/` untracked.
+
 Run lint before relying on Obsidian graph/backlinks:
 
 ```bash
@@ -75,7 +76,7 @@ python3 <skill-dir>/scripts/history.py lint --max-chars 16000
 
 ## Search Strategy
 
-Search uses SQLite FTS5's built-in `bm25()` ranking through Python's standard-library `sqlite3` module by default. Start broad, inspect generated variants and reflection, then narrow:
+Search uses the vendored `bm25s` engine with NumPy and builds its in-memory corpus directly from repository-local markdown. Start broad, inspect generated variants and reflection, then narrow:
 
 ```bash
 python3 <skill-dir>/scripts/history.py start --query "normalization" --limit 8
@@ -94,7 +95,7 @@ BM25 indexing uses virtual chunks rather than treating every file as one large s
 The search command performs three steps:
 
 1. Generate deterministic query variants from the original query, identifier/path splits, and intent words such as why, idea, experiment, code, or handoff.
-2. Rank history records with SQLite FTS5 `bm25()`.
+2. Rank history records with vendored BM25S.
 3. Print reflection notes about weak recall, missing query tokens, or over-concentrated result types.
 
 Use `exact` only as a fallback for literal string matching.
@@ -131,85 +132,9 @@ Collaboration records should keep this top metadata when applicable:
 
 `collab status` reports pending inbox submissions, accepted-but-unarchived inbox records, archive candidates, stale canonical/task/workstream context, unscoped handoffs/capsules, accepted decisions, and open risks.
 
-## Private Git Hub Workflow
-
-Use `hub` when separate servers or repos need to exchange searchable history through a private GitHub repository. The hub is a Git working tree containing mirrored markdown records; it is not a separate source of truth or database.
-
-Initialize or clone the hub working tree:
-
-```bash
-python3 <skill-dir>/scripts/history.py hub init \
-  --repo ~/Research/research-history-hub \
-  --remote git@github.com:OWNER/research-history-hub.git \
-  --push
-```
-
-Configure each source project once:
-
-```bash
-python3 <skill-dir>/scripts/history.py hub client-init \
-  --project operationbench \
-  --remote git@github.com:OWNER/research-history-hub.git
-```
-
-Use hub context at startup when cross-project memory may matter:
-
-```bash
-python3 <skill-dir>/scripts/history.py hub sync
-python3 <skill-dir>/scripts/history.py hub recall "dataset mismatch eval" --limit 8
-```
-
-Submit after creating local records:
-
-```bash
-python3 <skill-dir>/scripts/history.py finish
-python3 <skill-dir>/scripts/history.py hub submit
-```
-
-`hub submit` runs history lint, copies markdown records from the source repo into `history/projects/<project>/` in the hub clone, writes or updates `PROJECT.md`, rebuilds the hub `INDEX.md`, commits only `history/`, and pushes the configured branch. It excludes `history/templates/`, `history/outbox/`, generated `INDEX.md`, and archives unless `--include-archive` or config `include_archive` is set.
-
-Failure behavior:
-
-- clone/auth/network/push failure writes `history/outbox/hub/<timestamp>-<project>-hub-submit-failed.md` in the source project.
-- failed pushes keep the local hub commit for retry.
-- lint errors stop submission; `--strict` also treats lint warnings as blockers.
-- use SSH deploy keys or a credential helper; do not put PATs or tokens in remote URLs.
-
-## Central SSH Memory Server
-
-When a personal Linux desktop is the live memory host, it owns the current
-project vaults rather than each client keeping a writable clone. Its data root
-is separate from this source repository:
-
-```text
-/srv/research-memory/
-  projects/<project>/vault/  # canonical human-readable Markdown
-  projects/<project>/.git/  # optional local snapshot history
-  projects/<project>/project.yaml
-  registry.sqlite3           # revision and FTS5 metadata
-  audit/YYYY-MM-DD.jsonl     # actor-attributed mutation audit
-  trash/<trash-id>/          # recoverable notes and projects
-  backups/                   # staging only; use a separate private backup target
-```
-
-`client/memctl.py` is the agent/client write path over a restricted SSH forced
-command. It accepts safe project-relative `.md` paths, sends one JSON request,
-and receives one JSON response. Project keys must be separated by device,
-project, and read/write scope; the server-side `authorized_keys` command fixes
-that scope and its audit actor. `client/memory-run` mounts a selected key
-read-only into a disposable Docker container instead of embedding it in an
-image.
-
-The FastAPI administration UI is a human-only control plane for project/note
-creation, revision-aware editing, trash, and restore. Bind it only to
-`127.0.0.1:8787` and use an SSH local-forward. Do not use the RPC key for this
-tunnel. Obsidian/SSHFS/SFTP may inspect the same vault Markdown; direct edits
-are reindexed on the next server operation, but deletion must always go through
-the UI or `memctl` so trash and audit data are preserved.
-
 ## Vendored Retrieval
 
-The BM25 engine is SQLite FTS5's built-in `bm25()` auxiliary function, accessed through Python's standard-library `sqlite3` module. This avoids vendored Python search packages while keeping local lexical search fast enough for repository-scale history.
+The repository vendors the BM25S implementation under `scripts/vendor/bm25s/`; NumPy is the only runtime dependency used by the retrieval path. Search builds an in-memory index from the current markdown files, so there is no SQLite database, persistent search index, or server-side state to administer.
 
 ## Collaboration Notes
 

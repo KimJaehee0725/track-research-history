@@ -1,3 +1,11 @@
+---
+type: change
+title: "Change - Add collaboration archive workflow"
+date: "2026-05-08 02:21 +0900"
+status: completed
+tags: [history, change]
+agent: codex
+---
 # Change - Add collaboration archive workflow
 
 Date: 2026-05-08 02:21 +0900

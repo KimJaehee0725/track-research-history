@@ -1,3 +1,11 @@
+---
+type: change
+title: "Change - BM25 backend을 SQLite FTS5로 교체하고 Obsidian 전환 메모 추가"
+date: "2026-05-09 02:55 +0900"
+status: completed
+tags: [history, change]
+agent: codex
+---
 # Change - BM25 backend을 SQLite FTS5로 교체하고 Obsidian 전환 메모 추가
 
 Date: 2026-05-09 02:55 +0900

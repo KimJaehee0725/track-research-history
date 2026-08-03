@@ -1,3 +1,11 @@
+---
+type: change
+title: "Change - Fix collaboration workflow review findings"
+date: "2026-05-08 02:07 +0900"
+status: completed
+tags: [history, change]
+agent: codex
+---
 # Change - Fix collaboration workflow review findings
 
 Date: 2026-05-08 02:07 +0900

@@ -5,7 +5,7 @@ This folder stores durable project memory for research coding, experiments, idea
 ## Read First
 
 1. `CONTEXT.md`
-2. `INDEX.md`
+2. `PROJECT_MAP.md` in Obsidian, or `INDEX.md` in a text editor
 3. Latest file in `daily/`
 4. Relevant records from `changes/`, `decisions/`, `ideas/`, `experiments/`, `handoffs/`, `capsules/`, and `sessions/`
 
@@ -20,6 +20,10 @@ For collaboration projects, default agent context comes from `canonical/`, `task
 ## Archive
 
 `archive/` is tracked for provenance and long-term review, but excluded from collaboration recall unless `--include-archive` is passed. Archive cleanup moves files; it does not delete them.
+
+## Obsidian
+
+Open this `history/` folder directly as an Obsidian vault and start from `PROJECT_MAP.md`. Generated wikilinks are portable across clones. Keep `.obsidian/` untracked.
 
 ## Language
 

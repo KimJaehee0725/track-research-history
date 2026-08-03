@@ -1,0 +1,4 @@
+source=https://github.com/xhluca/bm25s
+commit=d4d3f462434537224d6083df16a2df4de341dc39
+license=MIT
+retrieved=2026-05-07

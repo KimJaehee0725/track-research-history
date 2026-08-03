@@ -1,4 +1,4 @@
 interface:
   display_name: "Track Research History"
-  short_description: "Repo history, SSH memory server, hub sync, and recall"
-  default_prompt: "Use $track-research-history to run read-only start or hub recall context at session open. When a central SSH memory server is configured, use memctl for live project memory and keep Obsidian as a viewer/editor of the same Markdown vault. Recall relevant project context, then record code rationale and handoff summaries in the user's working language before finish checks and hub submit when configured."
+  short_description: "Repo-local BM25S history and Obsidian maps"
+  default_prompt: "Use $track-research-history to recall repository-local Markdown with BM25S, maintain durable decisions and changes in history/, refresh the portable Obsidian project map, and run finish checks."

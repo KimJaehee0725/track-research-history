@@ -1,6 +1,6 @@
 ---
 name: track-research-history
-description: Maintain durable research-project history while coding, with dependency-light SQLite FTS5 BM25 recall, generated query variants, retrieval reflection, handoff agent capsules, maintainer-curated collaboration history, and private-Git hub sync for cross-server/project recall. Use when Codex or Claude needs to automatically record, submit, and recall why code changed, how it was implemented, which files changed, which ideas or hypotheses led to it, experiment decisions, collaboration handoffs, agent transition context, task/workstream context, canonical project context, or shared research history in a repository-level history/ folder, central history repo, or GitHub private hub.
+description: Maintain durable research-project history while coding, with repository-local vendored BM25S recall, generated query variants, retrieval reflection, handoff agent capsules, and maintainer-curated collaboration history for large benchmark projects. Use when Codex or Claude needs to automatically record and recall why code changed, how it was implemented, which files changed, which ideas or hypotheses led to it, experiment decisions, collaboration handoffs, agent transition context, task/workstream context, or canonical project context in a repository-level history/ folder.
 ---
 
 # Track Research History
@@ -27,7 +27,6 @@ Use these trigger points to decide when this skill should act:
 | Meaningful change or finding appears | Record the narrowest useful type: `change`, `decision`, `idea`, or `experiment`. Skip trivial chat, one-line answers, and read-only checks. |
 | Agent, tool, thread, host, or server handoff is needed | Create a `handoff-agent-capsule`; use a plain `handoff` for lighter collaborator transfer notes. |
 | Large collaboration context is used | Start from `collab recall`; participants use `collab submit-summary`, and maintainers use `collab promote`, `collab archive`, and `collab status`. |
-| `history/hub.json` exists or `HISTORY_HUB_REMOTE` is set | Run `hub sync` or `hub recall` at start when cross-project context may matter; run `hub submit` after recording local history. |
 | Before final response for non-trivial work | Run `finish`, resolve lint errors, and create any missing history record manually. `finish` does not auto-create records. |
 
 ## Language
@@ -44,6 +43,7 @@ Use a repository-local `history/` folder. If the project already has a history s
 history/
   CONTEXT.md
   INDEX.md
+  PROJECT_MAP.md
   README.md
   daily/
   changes/
@@ -56,7 +56,7 @@ history/
   templates/
 ```
 
-For large benchmark collaborations, use the `collab` layer in the same `history/` folder or in a dedicated central history repo:
+For large benchmark collaborations, use the `collab` layer in the same repository-local `history/` folder:
 
 ```text
 history/
@@ -73,7 +73,7 @@ history/
   capsules/
 ```
 
-Use the bundled script for deterministic structure, filenames, indexing, and SQLite FTS5 BM25 recall:
+Use the bundled script for deterministic structure, filenames, indexing, and vendored BM25S recall:
 
 ```bash
 python3 <skill-dir>/scripts/history.py bootstrap
@@ -82,84 +82,9 @@ python3 <skill-dir>/scripts/history.py recall --limit 8
 python3 <skill-dir>/scripts/history.py recall --query "reward shaping" --limit 8
 python3 <skill-dir>/scripts/history.py search "gain_normalized ablation idea" --limit 10
 python3 <skill-dir>/scripts/history.py finish
-python3 <skill-dir>/scripts/history.py hub status
-python3 <skill-dir>/scripts/history.py hub submit
 ```
 
 Resolve `<skill-dir>` to the directory containing this `SKILL.md`.
-
-## Private Git Hub Sync
-
-Use `hub` when multiple servers, repos, or agents should share history through a private GitHub repository. The hub is a Git transport and mirror, not a database. The source of truth remains markdown under `history/` plus Git commits.
-
-Setup on each project:
-
-```bash
-python3 <skill-dir>/scripts/history.py hub client-init \
-  --project operationbench \
-  --remote git@github.com:OWNER/research-history-hub.git
-```
-
-Startup with hub context:
-
-```bash
-python3 <skill-dir>/scripts/history.py hub sync
-python3 <skill-dir>/scripts/history.py hub recall "reward model eval" --limit 8
-python3 <skill-dir>/scripts/history.py start --query "reward model eval" --limit 8
-```
-
-Before final response, after local records are created and `finish` is clean enough for the task:
-
-```bash
-python3 <skill-dir>/scripts/history.py hub submit
-```
-
-`hub submit` copies this repo's markdown history into the local hub clone under `history/projects/<project>/`, rebuilds the hub index, commits only `history/`, and pushes the configured branch. If clone, auth, network, or push fails, it writes a retry marker under `history/outbox/hub/` in the source project.
-
-Prefer SSH deploy keys or a credential helper. Do not put personal access tokens in remote URLs. Do not store secrets, credentials, raw transcripts, private notes, or personal data in history records just because the GitHub repo is private.
-
-## Central SSH Memory Server
-
-Use the central memory server when a personal Linux desktop is available over
-SSH and every new container must immediately read and write the same project
-memory. In this mode the desktop server owns the canonical Markdown vault,
-search index, revisions, audit log, and recoverable trash. The private Git hub
-is a backup/mirror, not the live write path.
-
-Keep each project isolated under the server data root. A client key must be
-limited to its permitted project(s) and to read or write access; it must not be
-a general shell key. Do not copy a private key into an image, a repository, or
-a note. Mount it read-only only for the life of the container.
-
-Use the dependency-free client after the server administrator has installed a
-restricted `memory-rpc` SSH forced command:
-
-```bash
-python3 client/memctl.py --host memory-host --identity ~/.ssh/memory-alienlm \
-  project list
-python3 client/memctl.py --host memory-host --identity ~/.ssh/memory-alienlm \
-  note search alienlm "tokenizer recovery" --limit 8
-```
-
-For disposable Docker jobs, use the wrapper instead of manually copying
-credentials:
-
-```bash
-client/memory-run --project alienlm --host memory-host \
-  --identity ~/.ssh/memory-alienlm -- IMAGE COMMAND
-```
-
-The administration UI is intentionally loopback-only. Reach it through an SSH
-tunnel, then open `http://127.0.0.1:8787` locally:
-
-```bash
-ssh -N -L 8787:127.0.0.1:8787 researcher@memory-host
-```
-
-Deletion must move a note or project to server-side trash first. A project
-delete requires an exact project-ID confirmation and should be audited. Use
-the UI or server-admin policy to restore or permanently purge material only
-after the stated retention period.
 
 ## Obsidian Viewer Mode
 
@@ -167,9 +92,10 @@ Treat Obsidian as a human viewer/editor over the same Git-tracked markdown files
 
 New records created by the script include lightweight YAML frontmatter for Obsidian navigation (`type`, `title`, `date`, `status`, `tags`, and collaboration fields when available) while preserving the plain markdown metadata body used by agents. Do not rely on Obsidian's cache, remote vault internals, or plugin database as canonical project history.
 
-Run deterministic lint when adding Obsidian-style links or when notes become large:
+Open the project's `history/` directory directly as an Obsidian vault and start from `PROJECT_MAP.md`. The map is regenerated by record/index commands and contains only portable repo-relative wikilinks. `.obsidian/` is ignored locally so vault UI settings do not become shared project memory.
 
 ```bash
+python3 <skill-dir>/scripts/history.py obsidian-map
 python3 <skill-dir>/scripts/history.py lint
 python3 <skill-dir>/scripts/history.py lint --strict
 ```
@@ -270,7 +196,7 @@ If a handoff or capsule should be included in task/workstream-scoped `collab rec
 
 Use `collab` when a project has many people, many benchmark tasks, or a shared agent context that must stay curated. The central rule is summaries-only in `history/inbox/`, then maintainer promotion into accepted context.
 
-Initialize a central history repo or add the collaboration layer to an existing repo:
+Add the collaboration layer to the same project repository:
 
 ```bash
 python3 <skill-dir>/scripts/history.py collab bootstrap --task-count 15 --default-workstreams
@@ -352,7 +278,7 @@ Use history as a selective memory, not a prompt dump:
 - Prefer `recall --query "<specific subsystem or idea>"` over loading every file.
 - Use `start --query "<specific subsystem or idea>"` at new-session startup when you need read-only context. `recall` is still available for compatibility, but it may create today's daily log and rebuild `INDEX.md`.
 - BM25 search runs over virtual markdown-aware chunks: small files stay whole, while longer records split by `##` section and paragraph-sized chunks with overlap. Read the reported chunk heading and line number before opening the full file.
-- Use `search "<query>"` for SQLite FTS5 BM25-ranked retrieval; use `search --exact "<string>"` or `exact "<string>"` only when you need literal substring matches.
+- Use `search "<query>"` for vendored BM25S-ranked retrieval; use `search --exact "<string>"` or `exact "<string>"` only when you need literal substring matches.
 - Treat generated query variants as proposed search angles. If a variant is off-target, rerun with a more specific query.
 - Treat reflection notes as retrieval QA: absent tokens, weak results, or one-type-only hits mean you should verify current files or refine the query before relying on the result.
 - Follow links from `INDEX.md` only when they are relevant.

@@ -1,3 +1,10 @@
+---
+type: idea
+title: "Idea 0001 - Obsidian 기반 LLM-Wiki 전환 검토"
+date: "2026-05-09 02:46 +0900"
+status: open
+tags: [history, idea, obsidian, llm-wiki, architecture]
+---
 # Idea 0001 - Obsidian 기반 LLM-Wiki 전환 검토
 
 Date: 2026-05-09 02:46 +0900

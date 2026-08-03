@@ -1,34 +1,33 @@
 # Project Context
 
-Last updated: 2026-07-21
+Last updated: 2026-08-03
 
 ## Research Goal
 
-- 개인 Linux 데스크탑을 SSH 기반 연구 메모리의 실시간 원본으로 두고, 새 컨테이너·노트북·연구실 서버에서 같은 프로젝트 기록을 안전하게 읽고 쓴다.
+- 각 연구 프로젝트가 자신의 `history/` Markdown에 변경 이유, 결정, 실험, handoff를 가볍고 이식 가능하게 보관한다.
 
 ## Current Architecture Or Structure
 
-- `/srv/research-memory/projects/<project>/vault`의 Markdown이 프로젝트별 원본이다.
-- SQLite FTS5는 검색·revision·휴지통 메타데이터를, JSONL audit은 변경 행위를 보관한다.
-- `client/memctl.py`는 개인 password 모드 또는 legacy SSH key를 통해 SSH forced command로 접근하고, `server/app.py`는 localhost 전용 관리 UI를 제공한다.
-- private Git hub는 실시간 원본이 아니라 백업·이력 복제 경로로 유지한다.
+- 프로젝트별 `history/`와 Git이 유일한 durable source of truth다.
+- `scripts/history.py`가 구조, record, index, lint, recall을 관리한다.
+- ranked recall은 `scripts/vendor/bm25s/`와 NumPy만 사용하며 검색 시 현재 Markdown으로 in-memory index를 만든다.
+- `history/PROJECT_MAP.md`는 Obsidian에서 열 수 있는 repo-relative wikilink 진입점이다.
 
 ## Current Decisions
 
-- 프로젝트 ID와 Markdown 상대 경로는 서버에서 검증한다.
-- 개인 password 모드는 `memory-rpc`의 password-only forced command로 모든 프로젝트에 접근하며, project 선택은 client 요청에서 한다. legacy key mode는 호환용으로 유지한다.
-- Obsidian은 동일 Vault의 viewer/editor이며, 파일 삭제는 UI 또는 `memctl`만 사용한다.
+- SQLite, 중앙 memory server, password mode, SSH RPC, 별도 data vault를 사용하지 않는다.
+- 각 프로젝트의 `history/` 폴더를 Obsidian vault로 직접 열며 `.obsidian/`은 Git에서 제외한다.
+- collaboration layer도 별도 중앙 저장소가 아니라 해당 프로젝트의 `history/` 안에서만 사용한다.
 
 ## Active Ideas
 
-- 직접 SFTP/SSHFS 편집의 재색인과 충돌 처리 UX를 실제 운영 서버에서 점검한다.
-- private Git/NAS/offsite 백업 대상과 보존 기간을 서버 운영 환경에 맞춰 확정한다.
+- 기록 수가 커질 때 BM25S chunk 설정과 recall 품질을 실제 프로젝트별로 측정한다.
 
 ## Open Questions And Risks
 
-- Linux 서버에서 서비스 계정, SSH forced-command public keys, loopback UI, private backup target을 설정한다.
-- 각 프로젝트에 read/write 키를 발급하고 `memctl` 및 복구 smoke를 실행한다.
+- vendored BM25S 동작에는 NumPy가 필요하다.
+- 매우 큰 프로젝트에서는 검색 시 in-memory index 생성 비용을 재평가할 수 있으나 SQLite로 전환하지 않는다.
 
 ## Next Steps
 
--
+- Dolphin image가 이 skill을 직접 설치하고 중앙 Research Memory mount/config 없이 동작하도록 맞춘다.

@@ -1,7 +1,14 @@
+---
+type: decision
+title: "Obsidian은 viewer/editor로만 사용하고 Git history를 source of truth로 유지"
+date: "2026-05-09 02:59 +0900"
+status: superseded
+tags: [history, decision]
+---
 # Decision 0001 - Obsidian은 viewer/editor로만 사용하고 Git history를 source of truth로 유지
 
 Date: 2026-05-09 02:59 +0900
-Status: accepted
+Status: superseded
 
 ## Context
 
@@ -18,3 +25,7 @@ Obsidian 기반 LLM-Wiki 전환을 검토했지만, 서버 간 이동과 다중 
 ## Consequences
 
 다음 설계는 별도 vault나 compiled wiki 전환보다 Obsidian-friendly frontmatter/link conventions와 deterministic lint에 집중한다.
+
+## Superseded By
+
+[[decisions/0003-restore-repository-local-markdown-memory]]

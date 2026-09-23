@@ -671,7 +671,7 @@ class CollabBehaviorSmokeTests(unittest.TestCase):
 
         cli.run("collab", "archive")
 
-        archived = list((root / "history" / "archive" / "inbox").rglob(promoted.name))
+        archived = list((root / "history-archive").rglob(promoted.name))
         self.assertEqual(1, len(archived))
         self.assertFalse(promoted.exists())
         self.assertTrue(pending.exists())
@@ -754,8 +754,8 @@ class CollabBehaviorSmokeTests(unittest.TestCase):
         self.assertFalse(daily.exists())
         self.assertFalse(session.exists())
         self.assertTrue(recent.exists())
-        self.assertEqual(1, len(list((root / "history" / "archive" / "daily").rglob(daily.name))))
-        self.assertEqual(1, len(list((root / "history" / "archive" / "sessions").rglob(session.name))))
+        self.assertEqual(1, len(list((root / "history-archive").rglob(daily.name))))
+        self.assertEqual(1, len(list((root / "history-archive").rglob(session.name))))
 
     def test_scale_smoke_with_many_inbox_and_archived_records(self) -> None:
         root, cli = self.with_cli()
@@ -840,7 +840,7 @@ class CollabBehaviorSmokeTests(unittest.TestCase):
         elapsed = time.perf_counter() - start
 
         self.assertIn("pending_inbox: 500", status)
-        self.assertIn("| archive |", status)
+        self.assertIn("| history-archive |", status)
         self.assertNotIn("history/archive/", default_recall)
         self.assertNotIn("archive_status=archived", default_recall)
         self.assertIn("ARCHIVE_SCALE_MARKER", archive_recall)

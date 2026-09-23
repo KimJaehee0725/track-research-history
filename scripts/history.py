@@ -12,6 +12,8 @@ from pathlib import Path
 
 
 HISTORY_DIR = "history"
+ARCHIVE_DIR = "history-archive"
+LEGACY_ARCHIVE_DIR = "archive"
 SCRIPT_DIR = Path(__file__).resolve().parent
 VENDOR_DIR = SCRIPT_DIR / "vendor"
 if str(VENDOR_DIR) not in sys.path:
@@ -35,8 +37,75 @@ RECORD_DIRS = [
     "templates",
 ]
 DEFAULT_COLLAB_WORKSTREAMS = ["data", "eval", "model", "writeup"]
-COLLAB_DIRS = ["canonical", "tasks", "inbox", "archive"]
+COLLAB_DIRS = ["canonical", "tasks", "inbox"]
 ARCHIVE_TYPES = ["inbox", "daily", "sessions"]
+ARCHIVABLE_KINDS = [
+    "changes",
+    "decisions",
+    "ideas",
+    "experiments",
+    "handoffs",
+    "capsules",
+    "sessions",
+    "daily",
+    "inbox",
+]
+DEFAULT_ARCHIVE_KINDS = ["changes", "experiments", "daily", "sessions", "handoffs", "capsules", "inbox"]
+DEFAULT_ARCHIVE_AGE_DAYS = 60
+DEFAULT_ARCHIVE_KEEP_RECENT = 20
+ARCHIVE_SUMMARY_CHARS = 700
+ARCHIVE_MIN_SAVING = 0.30
+ARCHIVE_MIN_SAVING_CHARS = 400
+ARCHIVE_ADOPT_HINT_RECORDS = 60
+OPEN_STATUSES = {"open", "in-progress", "in progress", "active", "pending", "todo", "proposed", "draft", "ready"}
+RECORD_ID_PREFIXES = {
+    "changes": "chg",
+    "change": "chg",
+    "decisions": "dec",
+    "decision": "dec",
+    "ideas": "idea",
+    "idea": "idea",
+    "experiments": "exp",
+    "experiment": "exp",
+    "handoffs": "hnd",
+    "handoff": "hnd",
+    "capsules": "cap",
+    "handoff-agent-capsule": "cap",
+    "handoff-agent-capsule-import": "cap",
+    "sessions": "ses",
+    "session": "ses",
+    "daily": "day",
+    "inbox": "inb",
+    "canonical": "can",
+    "task-context": "tsk",
+    "workstream": "wst",
+}
+COMMIT_TRAILER_KEY = "History-Record"
+COMMIT_SECTION_HEADING = "Commits"
+COMMIT_ELEMENT_PREFIX = "cmt"
+COMMIT_DUE_MAX_FILES = 12
+COMMIT_DUE_MAX_MINUTES = 90
+ARCHIVE_INDEX_FILE = "INDEX.md"
+ARCHIVE_STUB_TAG = "archive-stub"
+ARCHIVE_SECTION_CHARS = 240
+SUMMARY_SECTIONS = {
+    "changes": ["Why", "How", "Files", "Validation", "Risks / Follow-Ups"],
+    "change": ["Why", "How", "Files", "Validation", "Risks / Follow-Ups"],
+    "decisions": ["Decision", "Context", "Rationale", "Consequences"],
+    "decision": ["Decision", "Context", "Rationale", "Consequences"],
+    "ideas": ["Problem / Opportunity", "Hypothesis", "Next Check"],
+    "idea": ["Problem / Opportunity", "Hypothesis", "Next Check"],
+    "experiments": ["Goal", "Results", "Interpretation / Next"],
+    "experiment": ["Goal", "Results", "Interpretation / Next"],
+    "handoffs": ["Summary", "Next Actions", "Risks"],
+    "handoff": ["Summary", "Next Actions", "Risks"],
+    "capsules": ["Current State", "Next Actions", "Open Risks"],
+    "sessions": ["Scope", "End Summary"],
+    "session": ["Scope", "End Summary"],
+    "daily": ["Focus", "Work Notes", "Linked Records"],
+    "inbox": ["Summary", "Claims", "Open Questions"],
+}
+DEFAULT_SUMMARY_SECTIONS = ["Summary", "Why", "Decision", "Goal", "Current State", "Focus"]
 SECRET_PATTERNS = [
     (re.compile(r"(?i)\b(password|passwd|pwd)\b\s*[:=]"), "password-like field"),
     (re.compile(r"(?i)\b(api[_-]?key|secret|token|credential)\b\s*[:=]"), "secret-like field"),
@@ -168,6 +237,7 @@ This folder stores durable project memory for research coding, experiments, idea
 2. `PROJECT_MAP.md` in Obsidian, or `INDEX.md` in a text editor
 3. Latest file in `daily/`
 4. Relevant records from `changes/`, `decisions/`, `ideas/`, `experiments/`, `handoffs/`, `capsules/`, and `sessions/`
+5. For anything older, the summary stubs here and their full text in `../history-archive/`
 
 ## Trusted Context
 
@@ -179,7 +249,13 @@ For collaboration projects, default agent context comes from `canonical/`, `task
 
 ## Archive
 
-`archive/` is tracked for provenance and long-term review, but excluded from collaboration recall unless `--include-archive` is passed. Archive cleanup moves files; it does not delete them.
+Old, rarely used records keep a summary stub here and move their full text to `../history-archive/YYYY-MM/<kind>/`. A stub carries `Archive State: stub`, the record id, the paired commits, a condensed summary, and an `Archived To:` pointer.
+
+The archive is tracked in Git for provenance but excluded from default recall, from this Obsidian vault, and from the default search index. Pass `--include-archive` to search it, or read `../history-archive/INDEX.md`. Nothing is deleted: `history.py archive restore --record <id>` reverses the move.
+
+## Commits
+
+Each record carries a `Record Id:` and a `## Commits` section, and each paired commit carries a `History-Record: <id>` trailer. Use `history.py commits --record <id>` to see the diffs behind a record, and `history.py sync-commits` to rebuild pairing from commit trailers.
 
 ## Obsidian
 
@@ -637,21 +713,34 @@ Do not store raw transcripts, credentials, private notes, or personal data.
     )
 
 
+def archive_root(root: Path) -> Path:
+    return root / ARCHIVE_DIR
+
+
+def legacy_archive_root(root: Path) -> Path:
+    return root / HISTORY_DIR / LEGACY_ARCHIVE_DIR
+
+
 def ensure_archive(root: Path) -> None:
-    history = root / HISTORY_DIR
-    archive = history / "archive"
+    archive = archive_root(root)
     archive.mkdir(parents=True, exist_ok=True)
-    for name in ARCHIVE_TYPES:
-        (archive / name).mkdir(parents=True, exist_ok=True)
     write_if_missing(
         archive / "README.md",
-        """# Collaboration Archive
+        """# History Archive
 
-Archived records are tracked for provenance and long-term review, but they are not part of default collaboration recall.
+Long-term storage for history records that are old and rarely used. Full record text lives here; `history/` keeps only a
+lightweight stub with the record id, metadata, paired commits, a short summary, and a pointer back to this folder.
 
-Use archived records as supporting evidence only after checking their provenance against accepted canonical, task, workstream, or decision context.
+Layout: `YYYY-MM/<kind>/<original-filename>.md`, where the month comes from the record date.
 
-`collab recall` excludes this folder unless `--include-archive` is passed.
+This folder is Git-tracked for provenance, but it is excluded from default recall, from the Obsidian vault opened at
+`history/`, and from the default BM25 index. Pass `--include-archive` to search it.
+
+Restore a record with `history.py archive restore --record <record-id>`; that moves the full text back into `history/`
+and removes the stub.
+
+`history/archive/` is the legacy location from earlier versions of this skill. It is still read for search and provenance;
+run `history.py archive migrate` to move it here.
 """,
     )
 
@@ -887,6 +976,48 @@ def set_frontmatter_field(text: str, key: str, value_text: str) -> str:
     return text[:start] + body + text[end:]
 
 
+_TEXT_CACHE: dict[tuple[str, int, int], str] = {}
+_META_CACHE: dict[tuple[str, int, int], dict[str, str]] = {}
+
+
+def _file_key(path: Path) -> tuple[str, int, int] | None:
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return (str(path), stat.st_mtime_ns, stat.st_size)
+
+
+def read_record_text(path: Path) -> str:
+    """Read a record, reusing the parse of an unchanged file within one run."""
+    key = _file_key(path)
+    if key is None:
+        return ""
+    cached = _TEXT_CACHE.get(key)
+    if cached is None:
+        try:
+            cached = path.read_text(encoding="utf-8")
+        except Exception:
+            cached = ""
+        if len(_TEXT_CACHE) > 5000:
+            _TEXT_CACHE.clear()
+        _TEXT_CACHE[key] = cached
+    return cached
+
+
+def record_metadata(path: Path) -> dict[str, str]:
+    key = _file_key(path)
+    if key is None:
+        return {}
+    cached = _META_CACHE.get(key)
+    if cached is None:
+        cached = parse_metadata(read_record_text(path))
+        if len(_META_CACHE) > 5000:
+            _META_CACHE.clear()
+        _META_CACHE[key] = cached
+    return cached
+
+
 def parse_metadata(text: str) -> dict[str, str]:
     meta: dict[str, str] = parse_frontmatter(text)
     for line in strip_frontmatter(text).splitlines():
@@ -899,11 +1030,7 @@ def parse_metadata(text: str) -> dict[str, str]:
 
 
 def metadata_value(path: Path, key: str, default: str = "-") -> str:
-    try:
-        meta = parse_metadata(path.read_text(encoding="utf-8"))
-    except Exception:
-        return default
-    return meta.get(metadata_key(key), default) or default
+    return record_metadata(path).get(metadata_key(key), default) or default
 
 
 def normalized_status(text: str | None) -> str:
@@ -911,11 +1038,7 @@ def normalized_status(text: str | None) -> str:
 
 
 def approval_status(path: Path) -> str:
-    try:
-        text = path.read_text(encoding="utf-8")
-    except Exception:
-        return "unknown"
-    meta = parse_metadata(text)
+    meta = record_metadata(path)
     approval = normalized_status(meta.get("approval status"))
     if approval:
         return approval
@@ -931,24 +1054,38 @@ def approval_status(path: Path) -> str:
 
 
 def archived_value(path: Path) -> str:
-    try:
-        meta = parse_metadata(path.read_text(encoding="utf-8"))
-    except Exception:
-        meta = {}
-    value_text = normalized_status(meta.get("archived"))
+    value_text = normalized_status(record_metadata(path).get("archived"))
     if value_text in {"yes", "true", "archived"}:
         return "yes"
     return "no"
 
 
+def in_archive_tree(path: Path) -> bool:
+    parts = path.parts
+    return ARCHIVE_DIR in parts or LEGACY_ARCHIVE_DIR in parts
+
+
 def archive_status(path: Path) -> str:
-    if "archive" in path.parts or archived_value(path) == "yes":
+    if in_archive_tree(path) or archived_value(path) == "yes":
         return "archived"
+    if is_archive_stub(path):
+        return "stub"
     return "active"
 
 
+def is_archive_stub(path: Path) -> bool:
+    if in_archive_tree(path):
+        return False
+    return normalized_status(metadata_value(path, "Archive State", "")) == "stub"
+
+
+def archived_to_value(path: Path) -> str:
+    value_text = metadata_value(path, "Archived To", "")
+    return "" if value_text in {"", "-"} else value_text
+
+
 def extract_section(text: str, heading: str) -> str:
-    pattern = re.compile(rf"^##\s+{re.escape(heading)}\s*$", re.IGNORECASE | re.MULTILINE)
+    pattern = re.compile(rf"^##\s+{re.escape(heading)}[ \t]*$", re.IGNORECASE | re.MULTILINE)
     match = pattern.search(text)
     if not match:
         return ""
@@ -966,7 +1103,8 @@ def set_metadata_line(text: str, key: str, value_text: str) -> str:
     first_section = re.search(r"^##\s+", text, flags=re.MULTILINE)
     insert = f"{key}: {value_text}\n"
     if first_section:
-        return text[: first_section.start()] + insert + text[first_section.start():]
+        head = text[: first_section.start()].rstrip("\n")
+        return head + "\n" + insert + "\n" + text[first_section.start():]
     return text.rstrip() + "\n" + insert
 
 
@@ -1036,10 +1174,445 @@ def git_status(root: Path, untracked_all: bool = False) -> str:
         return f"unavailable: {exc}"
 
 
-def write_record(root: Path, folder: str, filename: str, text: str, kind: str, title: str) -> Path:
+# --- Record identity -------------------------------------------------------
+
+
+_RECORD_DATE_CACHE: dict[tuple[str, float], datetime] = {}
+
+
+def kind_prefix(kind: str) -> str:
+    return RECORD_ID_PREFIXES.get(kind.strip().lower(), "rec")
+
+
+def compose_record_id(kind: str, stem: str) -> str:
+    prefix = kind_prefix(kind)
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", stem).strip("-").lower()
+    if not cleaned:
+        return prefix
+    if cleaned.startswith(f"{prefix}-"):
+        return cleaned
+    return f"{prefix}-{cleaned}"
+
+
+def record_id_for(path: Path) -> str:
+    stored = metadata_value(path, "Record Id", "")
+    if stored and stored != "-":
+        return stored.strip()
+    return compose_record_id(record_kind(path), path.stem)
+
+
+def record_datetime(path: Path) -> datetime:
+    """Record date from the filename, then metadata, then file mtime."""
+    try:
+        cache_key = (str(path.resolve()), path.stat().st_mtime)
+    except OSError:
+        cache_key = (str(path), 0.0)
+    cached = _RECORD_DATE_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    stamp: datetime | None = None
+    match = re.search(r"(\d{4})-(\d{2})-(\d{2})(?:-(\d{2})(\d{2})(\d{2}))?", path.name)
+    if match:
+        try:
+            stamp = datetime(
+                int(match.group(1)),
+                int(match.group(2)),
+                int(match.group(3)),
+                int(match.group(4) or 0),
+                int(match.group(5) or 0),
+                int(match.group(6) or 0),
+            ).astimezone()
+        except ValueError:
+            stamp = None
+    if stamp is None:
+        meta = record_metadata(path)
+        for key in ["date", "archived date", "promoted date", "last updated"]:
+            found = re.search(r"(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2}))?", meta.get(key, "") or "")
+            if not found:
+                continue
+            try:
+                stamp = datetime(
+                    int(found.group(1)),
+                    int(found.group(2)),
+                    int(found.group(3)),
+                    int(found.group(4) or 0),
+                    int(found.group(5) or 0),
+                ).astimezone()
+                break
+            except ValueError:
+                continue
+    if stamp is None:
+        try:
+            stamp = datetime.fromtimestamp(path.stat().st_mtime).astimezone()
+        except OSError:
+            stamp = now()
+    _RECORD_DATE_CACHE[cache_key] = stamp
+    return stamp
+
+
+def record_sort_key(path: Path) -> float:
+    return record_datetime(path).timestamp()
+
+
+def record_status(path: Path) -> str:
+    status = normalized_status(metadata_value(path, "Status", ""))
+    if status and status != "-":
+        return status
+    approval = normalized_status(metadata_value(path, "Approval Status", ""))
+    return approval if approval != "-" else ""
+
+
+def record_is_open(path: Path) -> bool:
+    return record_status(path) in OPEN_STATUSES
+
+
+def record_search_paths(root: Path) -> list[Path]:
+    return list(iter_history_files(root)) + list(iter_archive_files(root))
+
+
+def find_record(root: Path, ref: str) -> Path:
+    """Resolve a record id, repo-relative path, or unique id fragment to a file."""
+    ref = (ref or "").strip()
+    if not ref:
+        raise SystemExit("Record reference is empty.")
+    direct = Path(ref) if Path(ref).is_absolute() else root / ref
+    if direct.is_file() and direct.suffix == ".md":
+        return direct
+    needle = ref.lower()
+    candidates = record_search_paths(root)
+    exact = [path for path in candidates if record_id_for(path).lower() == needle]
+    if exact:
+        live = [path for path in exact if not in_archive_tree(path)]
+        return (live or exact)[0]
+    partial = [
+        path
+        for path in candidates
+        if needle in record_id_for(path).lower() or needle in path.stem.lower()
+    ]
+    live_partial = [path for path in partial if not in_archive_tree(path)]
+    if len({record_id_for(path) for path in partial}) == 1 and live_partial:
+        return live_partial[0]
+    if len(partial) == 1:
+        return partial[0]
+    if not partial:
+        raise SystemExit(f"No history record matches '{ref}'.")
+    listed = "\n".join(f"- {record_id_for(path)} ({rel(root, path)})" for path in partial[:10])
+    raise SystemExit(f"Ambiguous record reference '{ref}'. Candidates:\n{listed}")
+
+
+def remove_metadata_line(text: str, key: str) -> str:
+    bounds = frontmatter_bounds(text)
+    head = ""
+    rest = text
+    if bounds:
+        start, end = bounds
+        front = re.sub(rf"(?im)^{re.escape(frontmatter_key(key))}:.*\n?", "", text[start:end])
+        head = text[:start] + front
+        rest = text[end:]
+    first_section = re.search(r"^##\s+", rest, flags=re.MULTILINE)
+    limit = first_section.start() if first_section else len(rest)
+    meta_part = re.sub(rf"(?im)^{re.escape(key)}:.*\n?", "", rest[:limit])
+    return head + meta_part + rest[limit:]
+
+
+def append_to_section(text: str, heading: str, line: str) -> str:
+    pattern = re.compile(rf"^##\s+{re.escape(heading)}[ \t]*$", re.IGNORECASE | re.MULTILINE)
+    match = pattern.search(text)
+    if not match:
+        return text.rstrip() + f"\n\n## {heading}\n\n{line}\n"
+    start = match.end()
+    next_heading = re.search(r"^##\s+", text[start:], flags=re.MULTILINE)
+    end = start + next_heading.start() if next_heading else len(text)
+    body = text[start:end].strip()
+    body = line if body in {"", "-"} else body + "\n" + line
+    return text[:start] + "\n\n" + body + "\n\n" + text[end:].lstrip("\n")
+
+
+# --- Git and commit pairing ------------------------------------------------
+
+
+def git_output(root: Path, args: list[str]) -> str | None:
+    try:
+        out = subprocess.check_output(
+            ["git", "-C", str(root), *args],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+    except Exception:
+        return None
+    return out.strip()
+
+
+def git_available(root: Path) -> bool:
+    return git_output(root, ["rev-parse", "--is-inside-work-tree"]) == "true"
+
+
+def resolve_commit(root: Path, ref: str) -> str | None:
+    return git_output(root, ["rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"])
+
+
+def normalize_sha(sha: str) -> str:
+    return re.sub(r"[^0-9a-fA-F]", "", sha or "").lower()[:12]
+
+
+_COMMIT_META: dict[tuple[str, str], tuple[str, str]] = {}
+
+
+def prefetch_commit_meta(root: Path, shas: list[str]) -> None:
+    """Resolve date and subject for many commits in one `git log` call."""
+    missing = []
+    for sha in shas:
+        short = normalize_sha(sha)
+        if short and (str(root), short) not in _COMMIT_META:
+            missing.append(sha)
+    if not missing:
+        return
+    for batch_start in range(0, len(missing), 200):
+        batch = missing[batch_start : batch_start + 200]
+        out = git_output(
+            root,
+            [
+                "log",
+                "--no-walk",
+                "--format=%H%x01%ad%x01%s",
+                "--date=format:%Y-%m-%d %H:%M",
+                *batch,
+            ],
+        )
+        if not out:
+            continue
+        for line in out.splitlines():
+            parts = line.split("\x01")
+            if len(parts) != 3:
+                continue
+            _COMMIT_META[(str(root), normalize_sha(parts[0]))] = (parts[1].strip(), parts[2].strip())
+
+
+def commit_meta(root: Path, sha: str) -> tuple[str, str]:
+    key = (str(root), normalize_sha(sha))
+    if key not in _COMMIT_META:
+        prefetch_commit_meta(root, [sha])
+    return _COMMIT_META.get(key, ("-", "-"))
+
+
+def commit_subject(root: Path, sha: str) -> str:
+    return commit_meta(root, sha)[1]
+
+
+def commit_when(root: Path, sha: str) -> str:
+    return commit_meta(root, sha)[0]
+
+
+def commit_files(root: Path, sha: str) -> list[str]:
+    out = git_output(root, ["show", "--name-only", "--format=", sha])
+    return [line.strip() for line in out.splitlines() if line.strip()] if out else []
+
+
+def commit_line(root: Path, sha: str) -> str:
+    return f"- `{normalize_sha(sha)}` {commit_when(root, sha)} - {commit_subject(root, sha)}"
+
+
+def parse_commit_list(value_text: str) -> list[str]:
+    if not value_text or value_text.strip() in {"", "-"}:
+        return []
+    items: list[str] = []
+    for token in re.split(r"[,\s]+", value_text.strip()):
+        cleaned = normalize_sha(token.strip("`"))
+        if len(cleaned) >= 7 and cleaned not in items:
+            items.append(cleaned)
+    return items
+
+
+def record_commits(path: Path) -> list[str]:
+    text = read_record_text(path)
+    if not text:
+        return []
+    commits = parse_commit_list(record_metadata(path).get("commits", ""))
+    for token in re.findall(r"\b[0-9a-f]{7,40}\b", extract_section(text, COMMIT_SECTION_HEADING)):
+        cleaned = normalize_sha(token)
+        if cleaned and cleaned not in commits:
+            commits.append(cleaned)
+    return commits
+
+
+def write_commit_reference(root: Path, path: Path, sha: str) -> bool:
+    short = normalize_sha(sha)
+    if short in record_commits(path):
+        return False
+    text = read_record_text(path)
+    if not text:
+        return False
+    commits = parse_commit_list(parse_metadata(text).get("commits", ""))
+    commits.append(short)
+    text = set_metadata_line(text, "Commits", ", ".join(commits))
+    text = append_to_section(text, COMMIT_SECTION_HEADING, commit_line(root, sha))
+    path.write_text(text, encoding="utf-8")
+    return True
+
+
+def pair_record_commit(root: Path, path: Path, sha: str) -> bool:
+    """Write a commit reference into a record. Returns False when already paired."""
+    short = normalize_sha(sha)
+    if not short:
+        return False
+    paired = write_commit_reference(root, path, sha)
+    # Keep an archived counterpart in step, so the stub and the full text agree.
+    if is_archive_stub(path):
+        target = archived_to_value(path)
+        if target:
+            archived = root / target
+            if archived.exists():
+                write_commit_reference(root, archived, sha)
+    return paired
+
+
+def commit_trailer_block(record_ids: list[str]) -> str:
+    return "\n".join(f"{COMMIT_TRAILER_KEY}: {rid}" for rid in record_ids)
+
+
+def trailer_commit_map(root: Path, limit: int = 300) -> dict[str, list[str]]:
+    """{commit sha: [record ids]} from one `git log` pass, not one call per commit."""
+    out = git_output(
+        root,
+        [
+            "log",
+            f"-{limit}",
+            f"--grep={COMMIT_TRAILER_KEY}:",
+            "--format=%H%x01%B%x02",
+        ],
+    )
+    mapping: dict[str, list[str]] = {}
+    if not out:
+        return mapping
+    for entry in out.split("\x02"):
+        entry = entry.strip("\n")
+        if "\x01" not in entry:
+            continue
+        sha, body = entry.split("\x01", 1)
+        ids: list[str] = []
+        for item in re.findall(rf"(?im)^{re.escape(COMMIT_TRAILER_KEY)}:\s*(\S+)\s*$", body):
+            if item not in ids:
+                ids.append(item)
+        if ids:
+            mapping[sha.strip()] = ids
+    return mapping
+
+
+def record_commit_index(root: Path) -> dict[str, tuple[Path, list[str]]]:
+    """{record id: (path, paired commits)} built once per command."""
+    index: dict[str, tuple[Path, list[str]]] = {}
+    for path in record_search_paths(root):
+        record_id = record_id_for(path)
+        if record_id in index and in_archive_tree(path):
+            continue
+        index[record_id] = (path, record_commits(path))
+    return index
+
+
+def commit_record_ids(root: Path, sha: str) -> list[str]:
+    body = git_output(root, ["log", "-1", "--format=%B", sha]) or ""
+    found = re.findall(rf"(?im)^{re.escape(COMMIT_TRAILER_KEY)}:\s*(\S+)\s*$", body)
+    ids: list[str] = []
+    for item in found:
+        if item not in ids:
+            ids.append(item)
+    return ids
+
+
+def commits_with_trailer(root: Path, limit: int = 300) -> list[str]:
+    return list(trailer_commit_map(root, limit))
+
+
+def paired_record_paths(root: Path, kinds: list[str] | None = None) -> list[Path]:
+    kinds = kinds or ["changes", "experiments", "decisions", "ideas", "handoffs", "sessions"]
+    paths: list[Path] = []
+    for kind in kinds:
+        base = root / HISTORY_DIR / kind
+        if not base.exists():
+            continue
+        paths.extend(path for path in base.glob("*.md") if path.is_file() and path.name != "README.md")
+    return sorted(paths, key=record_sort_key, reverse=True)
+
+
+def unpaired_records(root: Path, limit: int = 10) -> list[Path]:
+    kinds = ["changes", "experiments"]
+    return [path for path in paired_record_paths(root, kinds) if not record_commits(path)][:limit]
+
+
+def uncommitted_work_paths(root: Path) -> list[str]:
+    status = git_status(root, untracked_all=True)
+    paths = [status_path(line) for line in status_lines(root, status)]
+    return [
+        path
+        for path in paths
+        if path and not path.startswith(f"{HISTORY_DIR}/") and not path.startswith(f"{ARCHIVE_DIR}/")
+    ]
+
+
+def oldest_change_minutes(root: Path, paths: list[str]) -> int | None:
+    oldest: float | None = None
+    for item in paths:
+        candidate = root / item
+        try:
+            mtime = candidate.stat().st_mtime
+        except OSError:
+            continue
+        oldest = mtime if oldest is None else min(oldest, mtime)
+    if oldest is None:
+        return None
+    return int((now().timestamp() - oldest) // 60)
+
+
+def commit_due_notes(root: Path) -> list[str]:
+    if not git_available(root):
+        return []
+    paths = uncommitted_work_paths(root)
+    if not paths:
+        return []
+    notes: list[str] = []
+    if len(paths) >= COMMIT_DUE_MAX_FILES:
+        notes.append(
+            f"commit due: {len(paths)} uncommitted non-history files "
+            f"(threshold {COMMIT_DUE_MAX_FILES}). Commit with `commit --record <id> -m \"...\"`."
+        )
+    minutes = oldest_change_minutes(root, paths)
+    if minutes is not None and minutes >= COMMIT_DUE_MAX_MINUTES:
+        notes.append(
+            f"commit due: oldest uncommitted change is {minutes} minutes old "
+            f"(threshold {COMMIT_DUE_MAX_MINUTES}). Pair the work with a history record and commit."
+        )
+    return notes
+
+
+def write_record(
+    root: Path,
+    folder: str,
+    filename: str,
+    text: str,
+    kind: str,
+    title: str,
+    commits: list[str] | None = None,
+) -> Path:
     ensure_history(root)
     out = root / HISTORY_DIR / folder / filename
-    text = add_obsidian_frontmatter(text, kind, title)
+    record_id = compose_record_id(folder, Path(filename).stem)
+    text = set_metadata_line(text, "Record Id", record_id)
+    resolved: list[str] = []
+    for ref in commits or []:
+        sha = resolve_commit(root, ref) or ref
+        short = normalize_sha(sha)
+        if short and short not in resolved:
+            resolved.append(short)
+    if resolved:
+        text = set_metadata_line(text, "Commits", ", ".join(resolved))
+    if f"## {COMMIT_SECTION_HEADING}" not in text:
+        commit_body = "\n".join(commit_line(root, sha) for sha in resolved) if resolved else "-"
+        text = text.rstrip() + f"\n\n## {COMMIT_SECTION_HEADING}\n\n{commit_body}\n"
+    extra: dict[str, object] = {"record_id": record_id}
+    if resolved:
+        extra["commits"] = resolved
+    text = add_obsidian_frontmatter(text, kind, title, extra)
     out.write_text(text, encoding="utf-8")
     append_daily(root, kind, title, out)
     build_index(root)
@@ -1086,30 +1659,32 @@ def build_index(root: Path) -> Path:
         title = first_heading(path)
         lines.append(f"- `{rel(root, path)}` - {title} (approval={approval_status(path)})")
     lines.append("")
-    archive = history / "archive"
-    archive_files = []
-    if archive.exists():
-        archive_files = [
-            p
-            for p in archive.rglob("*.md")
-            if p.name != "README.md" and "/templates/" not in p.as_posix()
-        ]
+    archive_files = iter_archive_files(root)
+    stubs = archive_stub_paths(root)
     lines.append("## Archive")
     lines.append("")
-    lines.append("Archive records are tracked for provenance but excluded from default collaboration recall.")
+    lines.append(
+        f"`{ARCHIVE_DIR}/` holds {len(archive_files)} full record texts; "
+        f"`{HISTORY_DIR}/` keeps {len(stubs)} summary stubs that point at them."
+    )
+    lines.append("")
+    lines.append(f"Archived records stay out of default recall. Use `--include-archive` or `{ARCHIVE_DIR}/{ARCHIVE_INDEX_FILE}`.")
     lines.append("")
     if not archive_files:
         lines.append("- none")
-    for path in sorted(archive_files, key=lambda p: p.stat().st_mtime, reverse=True)[:30]:
+    for path in archive_files[:30]:
         title = first_heading(path)
+        commits = record_commits(path)
         lines.append(
             f"- `{rel(root, path)}` - {title} "
-            f"(kind={record_kind(path)}, approval={approval_status(path)}, archive_status={archive_status(path)})"
+            f"(kind={record_kind(path)}, approval={approval_status(path)}, "
+            f"commits={', '.join(commits) if commits else '-'})"
         )
     lines.append("")
     out = history / "INDEX.md"
     out.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
     build_obsidian_map(root)
+    build_archive_index(root)
     return out
 
 
@@ -1166,12 +1741,9 @@ def build_obsidian_map(root: Path) -> Path:
 
 
 def first_heading(path: Path) -> str:
-    try:
-        for line in path.read_text(encoding="utf-8").splitlines():
-            if line.startswith("# "):
-                return line[2:].strip()
-    except Exception:
-        pass
+    for line in read_record_text(path).splitlines():
+        if line.startswith("# "):
+            return line[2:].strip()
     return path.stem
 
 
@@ -1206,7 +1778,7 @@ def split_identifier_text(text: str) -> str:
     return value.strip()
 
 
-def bm25_file_paths(root: Path) -> list[Path]:
+def bm25_file_paths(root: Path, include_archive: bool = False) -> list[Path]:
     paths = []
     for path in iter_search_files(root):
         if path.name in {"INDEX.md", OBSIDIAN_MAP_FILE}:
@@ -1214,12 +1786,14 @@ def bm25_file_paths(root: Path) -> list[Path]:
         if path.name.startswith("."):
             continue
         paths.append(path)
+    if include_archive:
+        paths.extend(iter_archive_files(root))
     return paths
 
 
-def bm25_documents(root: Path) -> list[dict[str, str]]:
+def bm25_documents(root: Path, include_archive: bool = False) -> list[dict[str, str]]:
     docs = []
-    for path in bm25_file_paths(root):
+    for path in bm25_file_paths(root, include_archive):
         try:
             raw = path.read_text(encoding="utf-8")
         except Exception:
@@ -1577,8 +2151,8 @@ def bm25_search_documents(docs: list[dict[str, str]], query: str, limit: int = 8
     return payload
 
 
-def bm25_search(root: Path, query: str, limit: int = 8) -> dict:
-    return bm25_search_documents(bm25_documents(root), query, limit)
+def bm25_search(root: Path, query: str, limit: int = 8, include_archive: bool = False) -> dict:
+    return bm25_search_documents(bm25_documents(root, include_archive), query, limit)
 
 
 def reflect_bm25_results(
@@ -1600,6 +2174,12 @@ def reflect_bm25_results(
     elif generated_unknown:
         preview = ", ".join(generated_unknown[:8])
         notes.append(f"Some generated expansion tokens were absent from the history index: {preview}.")
+
+    if any(result.get("archive_status") == "stub" for result in results):
+        notes.append(
+            "Some hits are archive stubs (summary only). Open the linked `Archived To:` path, "
+            "run `search --include-archive`, or `git show` the paired commit for the full record."
+        )
 
     if results:
         kinds = Counter(result["kind"] for result in results)
@@ -1700,7 +2280,7 @@ def cmd_change(args: argparse.Namespace) -> None:
     )
     if not args.no_git_status:
         text += "\n## Git Status Snapshot\n\n```text\n" + git_status(root) + "\n```\n"
-    write_record(root, "changes", filename, text, "change", title)
+    write_record(root, "changes", filename, text, "change", title, args.commit)
 
 
 def cmd_decision(args: argparse.Namespace) -> None:
@@ -1721,7 +2301,7 @@ def cmd_decision(args: argparse.Namespace) -> None:
         .replace("{{rationale}}", value(args.rationale))
         .replace("{{consequences}}", value(args.consequence))
     )
-    write_record(root, "decisions", filename, text, "decision", title)
+    write_record(root, "decisions", filename, text, "decision", title, args.commit)
 
 
 def cmd_idea(args: argparse.Namespace) -> None:
@@ -1744,7 +2324,7 @@ def cmd_idea(args: argparse.Namespace) -> None:
         .replace("{{links}}", bullets(args.link))
         .replace("{{next}}", value(args.next))
     )
-    write_record(root, "ideas", filename, text, "idea", title)
+    write_record(root, "ideas", filename, text, "idea", title, args.commit)
 
 
 def cmd_experiment(args: argparse.Namespace) -> None:
@@ -1768,7 +2348,7 @@ def cmd_experiment(args: argparse.Namespace) -> None:
         .replace("{{artifacts}}", bullets(args.artifact))
         .replace("{{next}}", value(args.next))
     )
-    write_record(root, "experiments", filename, text, "experiment", title)
+    write_record(root, "experiments", filename, text, "experiment", title, args.commit)
 
 
 def cmd_handoff(args: argparse.Namespace) -> None:
@@ -1797,7 +2377,7 @@ def cmd_handoff(args: argparse.Namespace) -> None:
         text = set_metadata_line(text, "Promoted To", "-")
         text = set_metadata_line(text, "Archived", "no")
         text = set_metadata_line(text, "Archived Date", "-")
-    write_record(root, "handoffs", filename, text, "handoff", title)
+    write_record(root, "handoffs", filename, text, "handoff", title, args.commit)
 
 
 def format_bm25_read_first(payload: dict) -> str:
@@ -1970,7 +2550,7 @@ def iter_history_files(root: Path) -> list[Path]:
         if "/templates/" not in p.as_posix()
         and not any(part.startswith(".") for part in p.relative_to(history).parts)
     ]
-    return sorted(files, key=lambda p: p.stat().st_mtime, reverse=True)
+    return sorted(files, key=record_sort_key, reverse=True)
 
 
 def iter_search_files(root: Path) -> list[Path]:
@@ -2118,10 +2698,13 @@ def clip(text: str, limit: int = 2800) -> str:
     return text[:limit].rstrip() + "\n...[truncated]\n"
 
 
-def search_lines(root: Path, query: str, limit: int) -> list[str]:
+def search_lines(root: Path, query: str, limit: int, include_archive: bool = False) -> list[str]:
     results: list[str] = []
     needle = query.lower()
-    for path in iter_search_files(root):
+    paths = list(iter_search_files(root))
+    if include_archive:
+        paths.extend(iter_archive_files(root))
+    for path in paths:
         try:
             lines = path.read_text(encoding="utf-8").splitlines()
         except Exception:
@@ -2139,21 +2722,21 @@ def cmd_search(args: argparse.Namespace) -> None:
     root = detect_root(args.root)
     ensure_history(root)
     if args.exact:
-        results = search_lines(root, args.query, args.limit)
+        results = search_lines(root, args.query, args.limit, args.include_archive)
         if not results:
             print("No matches.")
             return
         print("\n".join(results))
         return
 
-    payload = bm25_search(root, args.query, args.limit)
+    payload = bm25_search(root, args.query, args.limit, args.include_archive)
     print_bm25_payload(payload, show_variants=not args.no_variants)
 
 
 def cmd_exact(args: argparse.Namespace) -> None:
     root = detect_root(args.root)
     ensure_history(root)
-    results = search_lines(root, args.query, args.limit)
+    results = search_lines(root, args.query, args.limit, args.include_archive)
     if not results:
         print("No matches.")
         return
@@ -2259,13 +2842,39 @@ def cmd_start(args: argparse.Namespace) -> None:
     for path in iter_history_files(root):
         if path.name in {"CONTEXT.md", "INDEX.md", "README.md", OBSIDIAN_MAP_FILE} or "/daily/" in path.as_posix():
             continue
-        print(f"- `{rel(root, path)}` - {first_heading(path)}")
+        marker = " (archive stub)" if is_archive_stub(path) else ""
+        print(f"- `{rel(root, path)}` - {first_heading(path)}{marker}")
         count += 1
         if count >= args.limit:
             break
     if count == 0:
         print("- none")
     print("")
+
+    archived = iter_archive_files(root)
+    if not archive_stub_paths(root):
+        record_count = sum(
+            1
+            for path in iter_history_files(root)
+            if path.name not in {"CONTEXT.md", "INDEX.md", "README.md", OBSIDIAN_MAP_FILE}
+        )
+        if record_count >= ARCHIVE_ADOPT_HINT_RECORDS:
+            print("## Archive")
+            print("")
+            print(
+                f"- {record_count} records and no archive yet. Older records still cost full text on every recall."
+            )
+            print("- Run `archive adopt --dry-run` once to see the one-time bulk archive for this history.")
+            print("")
+    if archived:
+        print("## Archive")
+        print("")
+        print(
+            f"- {len(archived)} older records live in `{ARCHIVE_DIR}/`; "
+            f"`{HISTORY_DIR}/` keeps summary stubs with their paired commits."
+        )
+        print(f"- Search them with `search \"<query>\" --include-archive` or read `{ARCHIVE_DIR}/{ARCHIVE_INDEX_FILE}`.")
+        print("")
 
     print("## Latest Handoffs / Capsules")
     print("")
@@ -2282,7 +2891,7 @@ def cmd_start(args: argparse.Namespace) -> None:
     if args.query:
         print(f"## BM25 Recall: {args.query}")
         print("")
-        payload = bm25_search(root, args.query, args.limit)
+        payload = bm25_search(root, args.query, args.limit, args.include_archive)
         print_bm25_payload(payload, show_variants=not args.no_variants)
 
 
@@ -2321,6 +2930,68 @@ def cmd_finish(args: argparse.Namespace) -> None:
         print(f"- Changed non-history paths: {preview}")
     else:
         print("- no obvious missing history record from git status")
+
+    print("")
+    print("## Commit Pairing")
+    print("")
+    if not git_available(root):
+        print("- not a git repository; commit pairing is unavailable")
+    else:
+        pending = unpaired_records(root, 5)
+        if pending:
+            for path in pending:
+                print(f"- unpaired: `{rel(root, path)}` ({record_id_for(path)})")
+            print("- Pair each one with `commit --record <id> -m \"...\"` or `link-commit --record <id>`.")
+        else:
+            print("- every recent change/experiment record lists a commit")
+        for note in commit_due_notes(root):
+            print(f"- {note}")
+        trailers = trailer_commit_map(root, 50)
+        if trailers:
+            index = record_commit_index(root)
+            orphans = {
+                sha
+                for sha, record_ids in trailers.items()
+                for record_id in record_ids
+                if normalize_sha(sha) not in index.get(record_id, (None, []))[1]
+            }
+            if orphans:
+                print(
+                    f"- {len(orphans)} commit(s) carry a {COMMIT_TRAILER_KEY} trailer that no record lists; "
+                    "run `sync-commits`."
+                )
+
+    print("")
+    print("## Archive Pressure")
+    print("")
+    candidates = long_term_archive_candidates(
+        root,
+        list(DEFAULT_ARCHIVE_KINDS),
+        DEFAULT_ARCHIVE_AGE_DAYS,
+        DEFAULT_ARCHIVE_KEEP_RECENT,
+    )
+    stub_count = len(archive_stub_paths(root))
+    bulk = long_term_archive_candidates(
+        root,
+        list(DEFAULT_ARCHIVE_KINDS),
+        DEFAULT_ARCHIVE_AGE_DAYS,
+        0,
+    )
+    if candidates:
+        print(
+            f"- {len(candidates)} record(s) are older than {DEFAULT_ARCHIVE_AGE_DAYS} days and beyond the "
+            f"{DEFAULT_ARCHIVE_KEEP_RECENT} most recent per kind."
+        )
+        print("- Run `archive plan` to review, then `archive run` to keep summaries and move full texts.")
+    else:
+        print("- no records are due for archiving under the default policy")
+    if stub_count == 0 and len(bulk) >= ARCHIVE_ADOPT_HINT_RECORDS:
+        print(
+            f"- this history has never been archived and {len(bulk)} record(s) predate the "
+            f"{DEFAULT_ARCHIVE_AGE_DAYS}-day window; run `archive adopt --dry-run` to see a one-time bulk archive."
+        )
+    if legacy_archive_root(root).exists():
+        print(f"- legacy `{rel(root, legacy_archive_root(root))}` folder found; run `archive migrate`.")
 
     if errors or (args.strict and warnings):
         raise SystemExit(1)
@@ -2364,7 +3035,7 @@ def cmd_recall(args: argparse.Namespace) -> None:
     if args.query:
         print(f"## BM25 Recall: {args.query}")
         print("")
-        payload = bm25_search(root, args.query, args.limit)
+        payload = bm25_search(root, args.query, args.limit, args.include_archive)
         print_bm25_payload(payload, show_variants=not args.no_variants)
 
 
@@ -2648,7 +3319,7 @@ def parse_archive_include(value_text: str | None) -> list[str]:
 def is_older_than(path: Path, cutoff: datetime | None) -> bool:
     if cutoff is None:
         return True
-    return datetime.fromtimestamp(path.stat().st_mtime).astimezone() < cutoff
+    return record_datetime(path) < cutoff
 
 
 def promoted_to_value(path: Path) -> str:
@@ -2657,18 +3328,7 @@ def promoted_to_value(path: Path) -> str:
 
 
 def record_month(path: Path) -> str:
-    match = re.search(r"(\d{4})-(\d{2})", path.name)
-    if match:
-        return f"{match.group(1)}-{match.group(2)}"
-    try:
-        meta = parse_metadata(path.read_text(encoding="utf-8"))
-    except Exception:
-        meta = {}
-    for key in ["date", "promoted date", "last updated"]:
-        match = re.search(r"(\d{4})-(\d{2})", meta.get(key, ""))
-        if match:
-            return f"{match.group(1)}-{match.group(2)}"
-    return now().strftime("%Y-%m")
+    return record_datetime(path).strftime("%Y-%m")
 
 
 def unique_destination(path: Path) -> Path:
@@ -2685,9 +3345,290 @@ def unique_destination(path: Path) -> Path:
         idx += 1
 
 
-def archive_destination(root: Path, archive_type: str, source: Path) -> Path:
+def archive_destination(root: Path, kind: str, source: Path) -> Path:
     month = record_month(source)
-    return root / HISTORY_DIR / "archive" / archive_type / month / source.name
+    return archive_root(root) / month / kind / source.name
+
+
+def iter_archive_files(root: Path) -> list[Path]:
+    """Full archived record texts, from the current and legacy archive folders."""
+    paths: list[Path] = []
+    for base in [archive_root(root), legacy_archive_root(root)]:
+        if not base.exists():
+            continue
+        for path in base.rglob("*.md"):
+            if not path.is_file():
+                continue
+            if path.name in {"README.md", ARCHIVE_INDEX_FILE}:
+                continue
+            if any(part.startswith(".") for part in path.relative_to(base).parts):
+                continue
+            paths.append(path)
+    return sorted(paths, key=record_sort_key, reverse=True)
+
+
+def archive_index_path(root: Path) -> Path:
+    return archive_root(root) / ARCHIVE_INDEX_FILE
+
+
+def archive_stub_paths(root: Path) -> list[Path]:
+    return [path for path in iter_history_files(root) if is_archive_stub(path)]
+
+
+def summary_lines_for(path: Path, max_chars: int = ARCHIVE_SUMMARY_CHARS) -> list[str]:
+    """Condense a record into a handful of bullets that stay useful for recall."""
+    text = read_record_text(path)
+    if not text:
+        return ["- (record could not be read)"]
+    headings = SUMMARY_SECTIONS.get(record_kind(path), DEFAULT_SUMMARY_SECTIONS)
+    lines: list[str] = []
+    used = 0
+    for heading in headings:
+        if used >= max_chars:
+            break
+        section = extract_section(text, heading)
+        if not section or section.strip() == "-":
+            continue
+        parts = [
+            item.strip().lstrip("-").strip()
+            for item in section.splitlines()
+            if item.strip() and item.strip() != "-" and not item.strip().startswith("```")
+        ]
+        condensed = re.sub(r"\s+", " ", " ".join(parts)).strip()
+        if not condensed:
+            continue
+        snippet = condensed[:ARCHIVE_SECTION_CHARS].rstrip()
+        if len(condensed) > ARCHIVE_SECTION_CHARS:
+            snippet += "..."
+        line = f"- **{heading}**: {snippet}"
+        lines.append(line)
+        used += len(line)
+    if not lines:
+        body = re.sub(r"^#.*$", "", strip_frontmatter(text), flags=re.MULTILINE)
+        condensed = re.sub(r"\s+", " ", body).strip()
+        if condensed:
+            lines.append(f"- {condensed[:max_chars]}")
+    return lines or ["- (no summary content found)"]
+
+
+def archive_stub_text(root: Path, source: Path, destination: Path, summary: list[str]) -> str:
+    text = source.read_text(encoding="utf-8")
+    meta = parse_metadata(text)
+    kind = meta.get("type") or record_kind(source)
+    title = first_heading(source)
+    record_id = record_id_for(source)
+    commits = record_commits(source)
+
+    tags = ["history", kind, ARCHIVE_STUB_TAG]
+    for tag in split_tags(meta.get("tags")):
+        if tag not in tags:
+            tags.append(tag)
+    fields: dict[str, object] = {
+        "type": kind,
+        "title": title,
+        "date": meta.get("date") or record_datetime(source).strftime("%Y-%m-%d"),
+        "record_id": record_id,
+        "archive_state": "stub",
+        "archived_to": rel(root, destination),
+        "tags": tags,
+    }
+    if meta.get("status"):
+        fields["status"] = meta["status"]
+    if commits:
+        fields["commits"] = commits
+    for key in ["task", "workstream", "agent", "person", "approval status", "promoted to"]:
+        if meta.get(key) and meta[key] != "-":
+            fields[key] = meta[key]
+
+    lines = [frontmatter_block(fields).rstrip(), "", f"# {title}", ""]
+    lines.append(f"Record Id: {record_id}")
+    lines.append(f"Date: {meta.get('date', '-') or '-'}")
+    lines.append(f"Kind: {kind}")
+    if meta.get("status"):
+        lines.append(f"Status: {meta['status']}")
+    for key, label in [("task", "Task"), ("workstream", "Workstream"), ("agent", "Agent"), ("person", "Person")]:
+        if meta.get(key) and meta[key] != "-":
+            lines.append(f"{label}: {meta[key]}")
+    lines.append("Archive State: stub")
+    lines.append(f"Archived To: {rel(root, destination)}")
+    lines.append(f"Archived Date: {display_time()}")
+    lines.append(f"Commits: {', '.join(commits) if commits else '-'}")
+    lines.extend(["", "## Summary", ""])
+    lines.extend(summary)
+    lines.extend(["", f"## {COMMIT_SECTION_HEADING}", ""])
+    if commits:
+        lines.extend(commit_line(root, sha) for sha in commits)
+    else:
+        lines.append("-")
+    lines.extend(
+        [
+            "",
+            "## Full Record",
+            "",
+            f"- `{rel(root, destination)}` (`--include-archive`, or `archive restore --record {record_id}`)",
+        ]
+    )
+    if commits:
+        lines.append(f"- Paired diff: `git show {commits[0]}`")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def archived_record_text(root: Path, source: Path, stub_path: Path) -> str:
+    text = source.read_text(encoding="utf-8")
+    text = set_metadata_line(text, "Record Id", record_id_for(source))
+    text = set_metadata_line(text, "Archived", "yes")
+    text = set_metadata_line(text, "Archived Date", display_time())
+    text = set_metadata_line(text, "Archived From", rel(root, source))
+    text = set_metadata_line(text, "Archive Stub", rel(root, stub_path))
+    return text
+
+
+def restored_record_text(text: str) -> str:
+    for key in [
+        "Archived",
+        "Archived Date",
+        "Archived From",
+        "Archive Stub",
+        "Archive State",
+        "Archived To",
+    ]:
+        text = remove_metadata_line(text, key)
+    return text
+
+
+def actively_referenced_paths(root: Path) -> set[Path]:
+    """Records that curated context still points at, so age alone should not archive them."""
+    history = root / HISTORY_DIR
+    sources: list[Path] = []
+    context = history / "CONTEXT.md"
+    if context.exists():
+        sources.append(context)
+    for folder in ["canonical", "tasks"]:
+        base = history / folder
+        if base.exists():
+            sources.extend(path for path in base.rglob("*.md") if path.is_file())
+
+    referenced: set[Path] = set()
+    known = {path.stem: path for path in iter_history_files(root)}
+    for source in sources:
+        try:
+            text = source.read_text(encoding="utf-8")
+        except Exception:
+            continue
+        for raw in re.findall(r"\[\[([^\]]+)\]\]", text):
+            target = wikilink_target(raw)
+            stem = Path(target).stem
+            if stem in known:
+                referenced.add(known[stem].resolve())
+        for raw in re.findall(rf"`({re.escape(HISTORY_DIR)}/[^`]+\.md)`", text):
+            candidate = root / raw
+            if candidate.exists():
+                referenced.add(candidate.resolve())
+    return referenced
+
+
+def stub_saving(root: Path, kind: str, source: Path, summary_chars: int) -> tuple[int, int]:
+    """(record size, stub size) in characters, by building the stub we would write."""
+    text = read_record_text(source)
+    destination = archive_destination(root, kind, source)
+    stub = archive_stub_text(root, source, destination, summary_lines_for(source, summary_chars))
+    return len(text), len(stub)
+
+
+def long_term_archive_candidates(
+    root: Path,
+    kinds: list[str],
+    older_than_days: int | None,
+    keep_recent: int,
+    include_open: bool = False,
+    min_saving: float = ARCHIVE_MIN_SAVING,
+    include_referenced: bool = False,
+    summary_chars: int = ARCHIVE_SUMMARY_CHARS,
+    stats: Counter | None = None,
+) -> list[tuple[str, Path]]:
+    history = root / HISTORY_DIR
+    cutoff = now() - timedelta(days=older_than_days) if older_than_days is not None else None
+    referenced = set() if include_referenced else actively_referenced_paths(root)
+    candidates: list[tuple[str, Path]] = []
+    for kind in kinds:
+        base = history / kind
+        if not base.exists():
+            continue
+        files = [
+            path
+            for path in base.glob("*.md")
+            if path.is_file() and path.name != "README.md"
+        ]
+        files = [
+            path
+            for path in files
+            if not is_archive_stub(path) and archive_status(path) != "archived"
+        ]
+        files.sort(key=lambda path: (record_sort_key(path), path.name), reverse=True)
+        for path in files[max(0, keep_recent):]:
+            if not is_older_than(path, cutoff):
+                continue
+            if not include_open and record_is_open(path):
+                continue
+            if path.resolve() in referenced:
+                # Canonical, task, or workstream context still links to it.
+                continue
+            if min_saving > 0:
+                record_size, stub_size = stub_saving(root, kind, path, summary_chars)
+                saved = record_size - stub_size
+                worth_it = saved >= ARCHIVE_MIN_SAVING_CHARS and (
+                    not record_size or saved / record_size >= min_saving
+                )
+            else:
+                worth_it = True
+            if not worth_it:
+                # The stub would cost about as much to read as the record itself.
+                if stats is not None:
+                    stats["no-saving"] += 1
+                continue
+            candidates.append((kind, path))
+    return candidates
+
+
+def build_archive_index(root: Path) -> Path | None:
+    base = archive_root(root)
+    if not base.exists():
+        return None
+    files = iter_archive_files(root)
+    lines = [
+        "# History Archive Index",
+        "",
+        f"Generated: {display_time()}",
+        "",
+        f"Archived records: {len(files)}",
+        "",
+        "Full record texts live here; `history/` keeps a summary stub for each one.",
+        "",
+        "| Date | Kind | Record Id | Title | Commits | Archived Text |",
+        "| --- | --- | --- | --- | --- | --- |",
+    ]
+    for path in files:
+        commits = record_commits(path)
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    record_datetime(path).strftime("%Y-%m-%d"),
+                    record_kind(path),
+                    record_id_for(path),
+                    first_heading(path).replace("|", "/"),
+                    ", ".join(commits) if commits else "-",
+                    f"`{rel(root, path)}`",
+                ]
+            )
+            + " |"
+        )
+    if not files:
+        lines.append("| - | - | - | none | - | - |")
+    out = archive_index_path(root)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+    return out
 
 
 def archive_candidate_paths(
@@ -2782,10 +3723,7 @@ def cmd_collab_archive(args: argparse.Namespace) -> None:
 
 
 def collab_relevant(path: Path, task: str | None, workstream: str | None) -> bool:
-    try:
-        meta = parse_metadata(path.read_text(encoding="utf-8"))
-    except Exception:
-        return False
+    meta = record_metadata(path)
     meta_task = normalize_collab_id(meta.get("task", ""), "none") if meta.get("task") else ""
     meta_workstream = normalize_collab_id(meta.get("workstream", ""), "none") if meta.get("workstream") else ""
     if task and meta_task and meta_task not in {task, "all", "cross-task", "none"}:
@@ -2839,17 +3777,13 @@ def collab_paths(
                 if collab_relevant(path, task, workstream):
                     paths.append(path)
     if include_archive:
-        archive = history / "archive"
-        if archive.exists():
-            for path in sorted(archive.rglob("*.md"), key=lambda p: p.stat().st_mtime, reverse=True):
-                if path.name == "README.md" or not path.is_file():
+        for path in iter_archive_files(root):
+            meta = parse_metadata(path.read_text(encoding="utf-8"))
+            if (task or workstream) and record_kind(path) in {"daily", "sessions"}:
+                if not meta.get("task") and not meta.get("workstream"):
                     continue
-                meta = parse_metadata(path.read_text(encoding="utf-8"))
-                if (task or workstream) and record_kind(path) in {"daily", "sessions"}:
-                    if not meta.get("task") and not meta.get("workstream"):
-                        continue
-                if collab_relevant(path, task, workstream):
-                    paths.append(path)
+            if collab_relevant(path, task, workstream):
+                paths.append(path)
     deduped: list[Path] = []
     seen = set()
     for path in paths:
@@ -3081,8 +4015,9 @@ def cmd_collab_status(args: argparse.Namespace) -> None:
     print("")
     print("| Area | Files |")
     print("| --- | --- |")
-    for area in ["canonical", "tasks", "decisions", "handoffs", "capsules", "inbox", "archive"]:
+    for area in ["canonical", "tasks", "decisions", "handoffs", "capsules", "inbox"]:
         print(f"| {area} | {file_count(root, area)} |")
+    print(f"| {ARCHIVE_DIR} | {len(iter_archive_files(root))} |")
     print("")
     print("## Tasks")
     print("")
@@ -3203,6 +4138,672 @@ def cmd_collab_status(args: argparse.Namespace) -> None:
     print("")
 
 
+# --- Commit pairing commands ----------------------------------------------
+
+
+def run_git(root: Path, args: list[str], check: bool = True) -> subprocess.CompletedProcess[str]:
+    proc = subprocess.run(
+        ["git", "-C", str(root), *args],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if check and proc.returncode != 0:
+        raise SystemExit(f"git {' '.join(args)} failed:\n{proc.stdout}{proc.stderr}".rstrip())
+    return proc
+
+
+def require_git(root: Path) -> None:
+    if not git_available(root):
+        raise SystemExit(f"{root} is not a git repository; commit pairing needs Git.")
+
+
+def cmd_commit(args: argparse.Namespace) -> None:
+    root = detect_root(args.root)
+    require_git(root)
+    records = [find_record(root, ref) for ref in args.record]
+    record_ids = [record_id_for(path) for path in records]
+
+    if args.all:
+        run_git(root, ["add", "-A"])
+    for item in args.path or []:
+        run_git(root, ["add", "--", item])
+    if not args.no_stage_record:
+        run_git(root, ["add", "--", *[rel(root, path) for path in records]], check=False)
+
+    staged = git_output(root, ["diff", "--cached", "--name-only"])
+    if not staged:
+        raise SystemExit(
+            "Nothing is staged. Stage the work first, or pass --all / --path <file>."
+        )
+
+    message = args.message.rstrip() + "\n\n" + commit_trailer_block(record_ids) + "\n"
+    run_git(root, ["commit", "-m", message])
+    sha = resolve_commit(root, "HEAD") or "HEAD"
+    short = normalize_sha(sha)
+
+    print("# Paired Commit")
+    print("")
+    print(f"Commit: `{short}` - {commit_subject(root, sha)}")
+    print(f"Trailer: {COMMIT_TRAILER_KEY}: {', '.join(record_ids)}")
+    print("")
+    print("## Records")
+    print("")
+    for path, record_id in zip(records, record_ids):
+        pair_record_commit(root, path, sha)
+        print(f"- `{rel(root, path)}` ({record_id}) -> `{short}`")
+    print("")
+    print("## Files")
+    print("")
+    for item in commit_files(root, sha)[:20]:
+        print(f"- {item}")
+    print("")
+
+    build_index(root)
+    if args.no_record_commit:
+        print("Record files now carry the commit id and are left uncommitted.")
+        return
+    run_git(root, ["add", "--", HISTORY_DIR], check=False)
+    if (archive_root(root)).exists():
+        run_git(root, ["add", "--", ARCHIVE_DIR], check=False)
+    if git_output(root, ["diff", "--cached", "--name-only"]):
+        # No History-Record trailer here: the bookkeeping commit records the pairing,
+        # it is not itself the work the record describes.
+        bookkeeping = f"history: pair {', '.join(record_ids)} with {short}\n"
+        run_git(root, ["commit", "-m", bookkeeping])
+        print(f"Bookkeeping commit: `{normalize_sha(resolve_commit(root, 'HEAD') or '')}`")
+
+
+def cmd_link_commit(args: argparse.Namespace) -> None:
+    root = detect_root(args.root)
+    require_git(root)
+    records = [find_record(root, ref) for ref in args.record]
+    record_ids = [record_id_for(path) for path in records]
+    refs = args.commit or ["HEAD"]
+    shas: list[str] = []
+    for ref in refs:
+        sha = resolve_commit(root, ref)
+        if not sha:
+            raise SystemExit(f"Unknown commit: {ref}")
+        shas.append(sha)
+
+    print("# Link Commit")
+    print("")
+    linked = 0
+    for path, record_id in zip(records, record_ids):
+        for sha in shas:
+            if pair_record_commit(root, path, sha):
+                linked += 1
+                print(f"- `{rel(root, path)}` ({record_id}) -> `{normalize_sha(sha)}` {commit_subject(root, sha)}")
+            else:
+                print(f"- `{rel(root, path)}` ({record_id}) already lists `{normalize_sha(sha)}`")
+    print("")
+
+    if args.amend_trailer:
+        head = resolve_commit(root, "HEAD")
+        if len(shas) != 1 or shas[0] != head:
+            print("- skipped --amend-trailer: it only applies to a single commit that is HEAD.")
+        elif git_output(root, ["diff", "--cached", "--name-only"]):
+            print("- skipped --amend-trailer: staged changes would be folded into the amended commit.")
+        else:
+            missing = [rid for rid in record_ids if rid not in commit_record_ids(root, head)]
+            if not missing:
+                print("- HEAD already carries the record trailer.")
+            else:
+                body = git_output(root, ["log", "-1", "--format=%B", head]) or ""
+                new_body = body.rstrip() + "\n\n" + commit_trailer_block(missing) + "\n"
+                run_git(root, ["commit", "--amend", "-m", new_body])
+                new_head = resolve_commit(root, "HEAD") or ""
+                print(f"- amended HEAD trailer; commit id is now `{normalize_sha(new_head)}`")
+                for path in records:
+                    text = path.read_text(encoding="utf-8")
+                    text = text.replace(normalize_sha(head), normalize_sha(new_head))
+                    path.write_text(text, encoding="utf-8")
+                print("- rewrote the record commit ids to match the amended commit.")
+
+    build_index(root)
+    print(f"Linked: {linked}")
+
+
+def cmd_commits(args: argparse.Namespace) -> None:
+    root = detect_root(args.root)
+    print("# Commit Pairing")
+    print("")
+    if args.record:
+        path = find_record(root, args.record)
+        record_id = record_id_for(path)
+        commits = record_commits(path)
+        print(f"Record: {record_id}")
+        print(f"Path: `{rel(root, path)}`")
+        print(f"Archive Status: {archive_status(path)}")
+        print("")
+        print("## Paired Commits")
+        print("")
+        if not commits:
+            print("- none")
+        for sha in commits:
+            if git_available(root) and resolve_commit(root, sha):
+                print(commit_line(root, sha))
+                if args.stat:
+                    stat = git_output(root, ["show", "--stat", "--format=", sha]) or "-"
+                    print("")
+                    print("```text")
+                    print(stat)
+                    print("```")
+                    print("")
+            else:
+                print(f"- `{sha}` (not found in this repository)")
+        print("")
+        if git_available(root):
+            trailer_only = [
+                sha
+                for sha, record_ids in trailer_commit_map(root, args.limit).items()
+                if record_id in record_ids and normalize_sha(sha) not in commits
+            ]
+            if trailer_only:
+                print("## Commits Referencing This Record But Not Yet Paired")
+                print("")
+                for sha in trailer_only:
+                    print(commit_line(root, sha))
+                print("")
+                print("Run `sync-commits` to write them into the record.")
+                print("")
+        return
+
+    if args.commit:
+        require_git(root)
+        sha = resolve_commit(root, args.commit)
+        if not sha:
+            raise SystemExit(f"Unknown commit: {args.commit}")
+        short = normalize_sha(sha)
+        print(f"Commit: `{short}` - {commit_subject(root, sha)}")
+        print(f"Date: {commit_when(root, sha)}")
+        print("")
+        print("## Records")
+        print("")
+        found = False
+        for record_id in commit_record_ids(root, sha):
+            print(f"- trailer: {record_id}")
+            found = True
+        for path in record_search_paths(root):
+            if short in record_commits(path):
+                print(f"- record: `{rel(root, path)}` ({record_id_for(path)})")
+                found = True
+        if not found:
+            print("- none")
+        print("")
+        print("## Files")
+        print("")
+        for item in commit_files(root, sha)[:20]:
+            print(f"- {item}")
+        print("")
+        return
+
+    print("## Recent Records")
+    print("")
+    for path in paired_record_paths(root)[: args.limit]:
+        commits = record_commits(path)
+        print(
+            f"- `{rel(root, path)}` ({record_id_for(path)}) - "
+            f"commits={', '.join(commits) if commits else 'none'}"
+        )
+    print("")
+    pending = unpaired_records(root, args.limit)
+    print("## Unpaired Change/Experiment Records")
+    print("")
+    if not pending:
+        print("- none")
+    for path in pending:
+        print(f"- `{rel(root, path)}` ({record_id_for(path)})")
+    print("")
+
+
+def cmd_sync_commits(args: argparse.Namespace) -> None:
+    root = detect_root(args.root)
+    require_git(root)
+    print("# Sync Commit Pairing")
+    print("")
+    linked = 0
+    unknown: list[str] = []
+    index = record_commit_index(root)
+    trailers = trailer_commit_map(root, args.limit)
+    prefetch_commit_meta(root, list(trailers))
+    for sha, record_ids in trailers.items():
+        for record_id in record_ids:
+            entry = index.get(record_id)
+            if entry is None:
+                unknown.append(f"- `{normalize_sha(sha)}` references unknown record `{record_id}`")
+                continue
+            path, paired = entry
+            if normalize_sha(sha) in paired:
+                continue
+            if pair_record_commit(root, path, sha):
+                linked += 1
+                paired.append(normalize_sha(sha))
+                print(f"- `{rel(root, path)}` <- `{normalize_sha(sha)}` {commit_subject(root, sha)}")
+    if linked == 0:
+        print("- nothing new to pair")
+    print("")
+    if unknown:
+        print("## Unresolved Trailers")
+        print("")
+        print("\n".join(sorted(set(unknown))))
+        print("")
+    build_index(root)
+    print(f"Linked: {linked}")
+
+
+# --- Long-term archive commands -------------------------------------------
+
+
+def resolve_archive_kinds(value_text: str | None) -> list[str]:
+    if not value_text:
+        return list(DEFAULT_ARCHIVE_KINDS)
+    requested = [item.strip().lower() for item in value_text.split(",") if item.strip()]
+    if "all" in requested:
+        return list(ARCHIVABLE_KINDS)
+    unknown = sorted(set(requested) - set(ARCHIVABLE_KINDS))
+    if unknown:
+        raise SystemExit(
+            "Unsupported archive kind(s): "
+            + ", ".join(unknown)
+            + f". Supported kinds: {', '.join(ARCHIVABLE_KINDS)}, all"
+        )
+    return requested
+
+
+def archive_plan_pairs(
+    root: Path,
+    args: argparse.Namespace,
+    stats: Counter | None = None,
+) -> list[tuple[str, Path]]:
+    if getattr(args, "record", None):
+        pairs: list[tuple[str, Path]] = []
+        for ref in args.record:
+            path = find_record(root, ref)
+            if in_archive_tree(path) or is_archive_stub(path):
+                print(f"- skip (already archived): `{rel(root, path)}`")
+                continue
+            pairs.append((record_kind(path), path))
+        return pairs
+    return long_term_archive_candidates(
+        root,
+        resolve_archive_kinds(args.include),
+        args.older_than_days,
+        args.keep_recent,
+        args.include_open,
+        args.min_saving,
+        args.include_referenced,
+        getattr(args, "summary_chars", ARCHIVE_SUMMARY_CHARS),
+        stats,
+    )
+
+
+def print_skip_stats(stats: Counter) -> None:
+    skipped = stats.get("no-saving", 0)
+    if skipped:
+        print(
+            f"- skipped {skipped} record(s) whose summary stub would not be meaningfully "
+            "smaller than the record; archiving them would cost more to read, not less."
+        )
+
+
+def print_archive_policy(args: argparse.Namespace) -> None:
+    if getattr(args, "record", None):
+        print(f"Selection: explicit records ({', '.join(args.record)})")
+        return
+    print(f"Kinds: {', '.join(resolve_archive_kinds(args.include))}")
+    print(f"Older Than Days: {args.older_than_days if args.older_than_days is not None else '-'}")
+    print(f"Keep Recent Per Kind: {args.keep_recent}")
+    print(f"Min Saving Per Record: {args.min_saving:.0%}")
+    print(f"Include Open Records: {'yes' if args.include_open else 'no'}")
+    print(f"Include Records Linked From Curated Context: {'yes' if args.include_referenced else 'no'}")
+
+
+def cmd_archive_plan(args: argparse.Namespace) -> None:
+    root = detect_root(args.root)
+    ensure_history(root)
+    print("# Archive Plan")
+    print("")
+    print_archive_policy(args)
+    print("")
+    stats: Counter = Counter()
+    pairs = archive_plan_pairs(root, args, stats)
+    print("## Candidates")
+    print("")
+    if not pairs:
+        print("- none")
+        print_skip_stats(stats)
+    for kind, source in pairs:
+        destination = archive_destination(root, kind, source)
+        print(
+            f"- `{rel(root, source)}` ({record_id_for(source)}, {record_datetime(source).strftime('%Y-%m-%d')}) "
+            f"-> `{rel(root, destination)}`"
+        )
+    print("")
+    print(f"Candidate Count: {len(pairs)}")
+
+
+def cmd_archive_run(args: argparse.Namespace) -> None:
+    root = detect_root(args.root)
+    ensure_history(root)
+    print("# Archive Run")
+    print("")
+    print_archive_policy(args)
+    print(f"Dry Run: {'yes' if args.dry_run else 'no'}")
+    print("")
+    stats: Counter = Counter()
+    pairs = archive_plan_pairs(root, args, stats)
+    if not pairs:
+        print("- no archive candidates")
+        print_skip_stats(stats)
+        return
+    if args.dry_run:
+        print("## Candidates")
+        print("")
+        for kind, source in pairs:
+            print(f"- `{rel(root, source)}` -> `{rel(root, archive_destination(root, kind, source))}`")
+        print("")
+        print(f"Candidate Count: {len(pairs)}")
+        return
+
+    ensure_archive(root)
+    print("## Archived")
+    print("")
+    moved = 0
+    for kind, source in pairs:
+        destination = unique_destination(archive_destination(root, kind, source))
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        summary = summary_lines_for(source, args.summary_chars)
+        stub = archive_stub_text(root, source, destination, summary)
+        destination.write_text(archived_record_text(root, source, source), encoding="utf-8")
+        source.write_text(stub, encoding="utf-8")
+        moved += 1
+        print(f"- `{rel(root, source)}` -> `{rel(root, destination)}` (summary stub kept in place)")
+    build_index(root)
+    print("")
+    print(f"Archived Count: {moved}")
+
+
+def cmd_archive_restore(args: argparse.Namespace) -> None:
+    root = detect_root(args.root)
+    path = find_record(root, args.record)
+    if in_archive_tree(path):
+        archived = path
+        stub_ref = metadata_value(archived, "Archive Stub", "")
+        stub = root / stub_ref if stub_ref not in {"", "-"} else None
+    else:
+        if not is_archive_stub(path):
+            raise SystemExit(f"`{rel(root, path)}` is not an archive stub; nothing to restore.")
+        stub = path
+        target = archived_to_value(path)
+        if not target:
+            raise SystemExit(f"`{rel(root, path)}` has no `Archived To:` pointer.")
+        archived = root / target
+    if not archived.exists():
+        raise SystemExit(f"Archived text is missing: `{rel(root, archived)}`")
+
+    destination = stub if stub is not None else root / HISTORY_DIR / record_kind(archived) / archived.name
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(restored_record_text(archived.read_text(encoding="utf-8")), encoding="utf-8")
+    archived.unlink()
+    for parent in [archived.parent, archived.parent.parent]:
+        try:
+            parent.rmdir()
+        except OSError:
+            break
+    build_index(root)
+    print("# Archive Restore")
+    print("")
+    print(f"- restored `{rel(root, destination)}` from `{rel(root, archived)}`")
+
+
+def cmd_archive_status(args: argparse.Namespace) -> None:
+    root = detect_root(args.root)
+    ensure_history(root)
+    archived = iter_archive_files(root)
+    stubs = archive_stub_paths(root)
+    print("# Archive Status")
+    print("")
+    print(f"Archive Folder: `{ARCHIVE_DIR}/`")
+    print(f"Archived Records: {len(archived)}")
+    print(f"Summary Stubs In history/: {len(stubs)}")
+    legacy = legacy_archive_root(root)
+    if legacy.exists():
+        print(f"Legacy Folder Present: `{rel(root, legacy)}` (run `archive migrate`)")
+    print("")
+    print("## Active Records By Kind")
+    print("")
+    print("| Kind | Active | Stub | Archived |")
+    print("| --- | --- | --- | --- |")
+    for kind in ARCHIVABLE_KINDS:
+        base = root / HISTORY_DIR / kind
+        files = [p for p in base.glob("*.md") if p.is_file() and p.name != "README.md"] if base.exists() else []
+        stub_count = sum(1 for p in files if is_archive_stub(p))
+        archived_count = sum(1 for p in archived if record_kind(p) == kind)
+        print(f"| {kind} | {len(files) - stub_count} | {stub_count} | {archived_count} |")
+    print("")
+    print("## Archive By Month")
+    print("")
+    months = Counter(record_month(path) for path in archived)
+    if not months:
+        print("- none")
+    for month, count in sorted(months.items(), reverse=True):
+        print(f"- {month}: {count}")
+    print("")
+    print("## Candidates Under The Current Policy")
+    print("")
+    print_archive_policy(args)
+    print("")
+    stats = Counter()
+    pairs = long_term_archive_candidates(
+        root,
+        resolve_archive_kinds(args.include),
+        args.older_than_days,
+        args.keep_recent,
+        args.include_open,
+        args.min_saving,
+        args.include_referenced,
+        ARCHIVE_SUMMARY_CHARS,
+        stats,
+    )
+    if not pairs:
+        print("- none")
+        print_skip_stats(stats)
+    for kind, source in pairs[: args.limit]:
+        print(f"- `{rel(root, source)}` ({record_datetime(source).strftime('%Y-%m-%d')})")
+    if len(pairs) > args.limit:
+        print(f"- ... {len(pairs) - args.limit} more")
+    print("")
+    print(f"Candidate Count: {len(pairs)}")
+
+
+def legacy_archive_sources(root: Path) -> list[Path]:
+    legacy = legacy_archive_root(root)
+    if not legacy.exists():
+        return []
+    return [
+        path
+        for path in sorted(legacy.rglob("*.md"))
+        if path.is_file() and path.name not in {"README.md", ARCHIVE_INDEX_FILE}
+    ]
+
+
+def migrate_legacy_archive(root: Path, dry_run: bool, verbose: bool = True) -> int:
+    """Move a legacy history/archive/ tree into history-archive/. Returns the count."""
+    legacy = legacy_archive_root(root)
+    sources = legacy_archive_sources(root)
+    if not dry_run and sources:
+        ensure_archive(root)
+    for source in sources:
+        destination = archive_destination(root, record_kind(source), source)
+        if not dry_run:
+            destination = unique_destination(destination)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            source.replace(destination)
+        if verbose:
+            print(f"- `{rel(root, source)}` -> `{rel(root, destination)}`")
+    if dry_run or not legacy.exists():
+        return len(sources)
+    for path in sorted(legacy.rglob("*"), reverse=True):
+        if path.is_dir():
+            try:
+                path.rmdir()
+            except OSError:
+                pass
+    leftover = [
+        path
+        for path in legacy.rglob("*.md")
+        if path.name not in {"README.md", ARCHIVE_INDEX_FILE}
+    ]
+    if not leftover:
+        for name in ["README.md", ARCHIVE_INDEX_FILE]:
+            stale = legacy / name
+            if stale.exists():
+                stale.unlink()
+        try:
+            legacy.rmdir()
+        except OSError:
+            pass
+    return len(sources)
+
+
+def recall_surface(root: Path) -> tuple[int, int]:
+    """(files, bytes) that default recall would read. Uses stat, not reads."""
+    total = 0
+    paths = bm25_file_paths(root)
+    for path in paths:
+        try:
+            total += path.stat().st_size
+        except OSError:
+            continue
+    return len(paths), total
+
+
+def cmd_archive_migrate(args: argparse.Namespace) -> None:
+    root = detect_root(args.root)
+    legacy = legacy_archive_root(root)
+    print("# Archive Migrate")
+    print("")
+    if not legacy.exists():
+        print(f"- no legacy `{rel(root, legacy)}` folder")
+        return
+    if not legacy_archive_sources(root):
+        print("- legacy folder has no archived records")
+    moved = migrate_legacy_archive(root, args.dry_run)
+    print("")
+    if args.dry_run:
+        print(f"Candidate Count: {moved}")
+        return
+    build_index(root)
+    print(f"Migrated Count: {moved}")
+
+
+def cmd_archive_adopt(args: argparse.Namespace) -> None:
+    """First-run bulk archive for a history that predates summary stubs."""
+    root = detect_root(args.root)
+    ensure_history(root)
+    kinds = resolve_archive_kinds(args.include)
+    stubs_before = len(archive_stub_paths(root))
+
+    print("# Archive Adopt")
+    print("")
+    print("One-time bulk archive for a history written before summary stubs existed.")
+    print("")
+    print(f"Kinds: {', '.join(kinds)}")
+    print(f"Older Than Days: {args.older_than_days}")
+    print(f"Keep Recent Per Kind: {args.keep_recent}")
+    print(f"Min Saving Per Record: {args.min_saving:.0%}")
+    print(f"Include Open Records: {'yes' if args.include_open else 'no'}")
+    print(f"Include Records Linked From Curated Context: {'yes' if args.include_referenced else 'no'}")
+    print(f"Dry Run: {'yes' if args.dry_run else 'no'}")
+    print("")
+
+    if stubs_before:
+        print(f"- note: {stubs_before} summary stub(s) already exist, so this history was adopted before.")
+        print("- Already-archived records are skipped; this run only covers what is still full text.")
+        print("")
+
+    legacy_count = len(legacy_archive_sources(root))
+    if legacy_count:
+        print("## Legacy Archive Folder")
+        print("")
+        migrate_legacy_archive(root, args.dry_run)
+        print("")
+        print(f"Legacy Records Moved: {legacy_count}")
+        print("")
+
+    before_files, before_bytes = recall_surface(root)
+    stats: Counter = Counter()
+    pairs = long_term_archive_candidates(
+        root,
+        kinds,
+        args.older_than_days,
+        args.keep_recent,
+        args.include_open,
+        args.min_saving,
+        args.include_referenced,
+        args.summary_chars,
+        stats,
+    )
+
+    print("## Records To Archive")
+    print("")
+    if not pairs:
+        print("- none")
+        print_skip_stats(stats)
+        print("")
+        print(
+            "This history is already as cheap to recall as summary stubs would make it. "
+            "Re-run later, or lower the bar with `--min-saving 0`."
+        )
+    else:
+        by_kind = Counter(kind for kind, _ in pairs)
+        for kind, count in sorted(by_kind.items()):
+            print(f"- {kind}: {count}")
+        oldest = min(record_datetime(path) for _, path in pairs)
+        newest = max(record_datetime(path) for _, path in pairs)
+        print(f"- date range: {oldest:%Y-%m-%d} .. {newest:%Y-%m-%d}")
+    print("")
+
+    if args.dry_run:
+        print(f"Candidate Count: {len(pairs)}")
+        if pairs:
+            print_skip_stats(stats)
+        print("")
+        print("Re-run without --dry-run to apply. Nothing was changed.")
+        return
+
+    if pairs:
+        ensure_archive(root)
+        for kind, source in pairs:
+            destination = unique_destination(archive_destination(root, kind, source))
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            summary = summary_lines_for(source, args.summary_chars)
+            stub = archive_stub_text(root, source, destination, summary)
+            destination.write_text(archived_record_text(root, source, source), encoding="utf-8")
+            source.write_text(stub, encoding="utf-8")
+        build_index(root)
+
+    after_files, after_bytes = recall_surface(root)
+    print("## Result")
+    print("")
+    print(f"- archived: {len(pairs)} record(s)")
+    if pairs:
+        print_skip_stats(stats)
+    print(f"- recall surface: {before_bytes / 1000:.1f}k -> {after_bytes / 1000:.1f}k chars across {after_files} files")
+    if before_bytes and after_bytes < before_bytes:
+        print(f"- reduction: {(1 - after_bytes / before_bytes) * 100:.1f}%")
+    if not pairs:
+        return
+    print("")
+    print("Next:")
+    print(f"- Review the move, then commit `{HISTORY_DIR}/` and `{ARCHIVE_DIR}/` together.")
+    print(f"- Full texts stay in `{ARCHIVE_DIR}/`; reach them with `--include-archive` or `archive restore --record <id>`.")
+    if git_available(root):
+        print("- Run `sync-commits` to pair existing commits that carry a History-Record trailer.")
+
+
 def add_root(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--root", help="Repository root. Defaults to git root, then current directory.")
 
@@ -3222,6 +4823,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--context-chars", type=int, default=2800)
     p.add_argument("--daily-chars", type=int, default=1800)
     p.add_argument("--no-variants", action="store_true", help="Hide generated query variants in BM25 recall.")
+    p.add_argument("--include-archive", action="store_true", help="Also search archived record texts.")
     p.set_defaults(func=cmd_start)
 
     p = sub.add_parser("today", help="Create or print today's daily log path.")
@@ -3242,6 +4844,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--risk")
     p.add_argument("--status", default="completed")
     p.add_argument("--agent", default="codex")
+    p.add_argument("--commit", action="append", help="Pair this commit-ish with the record. Repeatable.")
     p.add_argument("--no-git-status", action="store_true")
     p.set_defaults(func=cmd_change)
 
@@ -3252,6 +4855,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--rationale")
     p.add_argument("--consequence")
     p.add_argument("--status", default="accepted")
+    p.add_argument("--commit", action="append", help="Pair this commit-ish with the record. Repeatable.")
     p.set_defaults(func=cmd_decision)
 
     p = sub.add_parser("idea", help="Record a research or implementation idea.")
@@ -3263,6 +4867,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--next")
     p.add_argument("--tag", action="append")
     p.add_argument("--status", default="open")
+    p.add_argument("--commit", action="append", help="Pair this commit-ish with the record. Repeatable.")
     p.set_defaults(func=cmd_idea)
 
     p = sub.add_parser("experiment", help="Record an experiment, analysis, or figure export.")
@@ -3275,6 +4880,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--next")
     p.add_argument("--tag", action="append")
     p.add_argument("--status", default="recorded")
+    p.add_argument("--commit", action="append", help="Pair this commit-ish with the record. Repeatable.")
     p.set_defaults(func=cmd_experiment)
 
     p = sub.add_parser("handoff", help="Record collaborator or agent handoff context.")
@@ -3286,6 +4892,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--risk")
     p.add_argument("--task", help="Optional collaboration task id for scoped recall.")
     p.add_argument("--workstream", help="Optional collaboration workstream id for scoped recall.")
+    p.add_argument("--commit", action="append", help="Pair this commit-ish with the record. Repeatable.")
     p.set_defaults(func=cmd_handoff)
 
     p = sub.add_parser(
@@ -3343,11 +4950,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--limit", type=int, default=20)
     p.add_argument("--exact", action="store_true", help="Use exact substring matching instead of BM25S.")
     p.add_argument("--no-variants", action="store_true", help="Hide generated query variants.")
+    p.add_argument("--include-archive", action="store_true", help="Also search archived record texts.")
     p.set_defaults(func=cmd_search)
 
     p = sub.add_parser("exact", help="Exact substring search over history markdown files.")
     p.add_argument("query")
     p.add_argument("--limit", type=int, default=20)
+    p.add_argument("--include-archive", action="store_true", help="Also search archived record texts.")
     p.set_defaults(func=cmd_exact)
 
     p = sub.add_parser("recent", help="List recent history records.")
@@ -3380,7 +4989,135 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--context-chars", type=int, default=2800)
     p.add_argument("--daily-chars", type=int, default=1800)
     p.add_argument("--no-variants", action="store_true", help="Hide generated query variants in BM25 recall.")
+    p.add_argument("--include-archive", action="store_true", help="Also search archived record texts.")
     p.set_defaults(func=cmd_recall)
+
+    p = sub.add_parser("commit", help="Create a Git commit paired with one or more history records.")
+    p.add_argument("--record", action="append", required=True, help="Record id, path, or unique id fragment. Repeatable.")
+    p.add_argument("-m", "--message", required=True)
+    p.add_argument("--all", action="store_true", help="Stage every change before committing.")
+    p.add_argument("--path", action="append", help="Stage this path before committing. Repeatable.")
+    p.add_argument("--no-stage-record", action="store_true", help="Do not stage the record files themselves.")
+    p.add_argument(
+        "--no-record-commit",
+        action="store_true",
+        help="Leave the updated record files uncommitted instead of adding a bookkeeping commit.",
+    )
+    p.set_defaults(func=cmd_commit)
+
+    p = sub.add_parser("link-commit", help="Pair an existing commit with one or more history records.")
+    p.add_argument("--record", action="append", required=True)
+    p.add_argument("--commit", action="append", help="Commit-ish. Defaults to HEAD. Repeatable.")
+    p.add_argument(
+        "--amend-trailer",
+        action="store_true",
+        help=f"Add the {COMMIT_TRAILER_KEY} trailer to HEAD. This rewrites the HEAD commit id.",
+    )
+    p.set_defaults(func=cmd_link_commit)
+
+    p = sub.add_parser("commits", help="Show record-to-commit pairing in both directions.")
+    p.add_argument("--record", help="Record id, path, or unique id fragment.")
+    p.add_argument("--commit", help="Show which records reference this commit.")
+    p.add_argument("--stat", action="store_true", help="Print `git show --stat` for each paired commit.")
+    p.add_argument("--limit", type=int, default=12)
+    p.set_defaults(func=cmd_commits)
+
+    p = sub.add_parser("sync-commits", help=f"Backfill pairing from {COMMIT_TRAILER_KEY} commit trailers.")
+    p.add_argument("--limit", type=int, default=300, help="How many commits to scan.")
+    p.set_defaults(func=cmd_sync_commits)
+
+    p = sub.add_parser(
+        "archive",
+        help=f"Move old records into {ARCHIVE_DIR}/ and keep a summary stub in {HISTORY_DIR}/.",
+    )
+    archive_sub = p.add_subparsers(dest="archive_command", required=True)
+
+    def add_archive_policy(target: argparse.ArgumentParser, keep_recent_default: int | None = None) -> None:
+        target.add_argument(
+            "--include",
+            help=(
+                "Comma-separated kinds to consider "
+                f"({', '.join(ARCHIVABLE_KINDS)}) or `all`. "
+                f"Defaults to {', '.join(DEFAULT_ARCHIVE_KINDS)}."
+            ),
+        )
+        target.add_argument(
+            "--older-than-days",
+            type=int,
+            default=DEFAULT_ARCHIVE_AGE_DAYS,
+            help=f"Only consider records older than N days. Defaults to {DEFAULT_ARCHIVE_AGE_DAYS}.",
+        )
+        keep_default = DEFAULT_ARCHIVE_KEEP_RECENT if keep_recent_default is None else keep_recent_default
+        target.add_argument(
+            "--keep-recent",
+            type=int,
+            default=keep_default,
+            help=f"Always keep the newest N records per kind. Defaults to {keep_default}.",
+        )
+        target.add_argument(
+            "--min-saving",
+            type=float,
+            default=ARCHIVE_MIN_SAVING,
+            help=(
+                "Archive a record only when its summary stub is at least this much smaller "
+                f"than the record (and at least {ARCHIVE_MIN_SAVING_CHARS} characters smaller). "
+                f"Defaults to {ARCHIVE_MIN_SAVING:.2f}; pass 0 to archive regardless."
+            ),
+        )
+        target.add_argument(
+            "--include-open",
+            action="store_true",
+            help="Also archive records whose status is still open, in-progress, or proposed.",
+        )
+        target.add_argument(
+            "--include-referenced",
+            action="store_true",
+            help="Also archive records that CONTEXT.md, canonical/, or tasks/ still link to.",
+        )
+
+    ap = archive_sub.add_parser("plan", help="List records that would be archived.")
+    add_archive_policy(ap)
+    ap.add_argument("--record", action="append", help="Plan these specific records instead of using the age policy.")
+    ap.set_defaults(func=cmd_archive_plan)
+
+    ap = archive_sub.add_parser("run", help="Archive full record texts and leave summary stubs behind.")
+    add_archive_policy(ap)
+    ap.add_argument("--record", action="append", help="Archive these specific records regardless of age.")
+    ap.add_argument("--dry-run", action="store_true", help="Print the plan without moving or rewriting files.")
+    ap.add_argument(
+        "--summary-chars",
+        type=int,
+        default=ARCHIVE_SUMMARY_CHARS,
+        help=f"Summary budget kept in the stub. Defaults to {ARCHIVE_SUMMARY_CHARS}.",
+    )
+    ap.set_defaults(func=cmd_archive_run)
+
+    ap = archive_sub.add_parser(
+        "adopt",
+        help="First run on an existing history: bulk-archive everything past the age window.",
+    )
+    add_archive_policy(ap, keep_recent_default=0)
+    ap.add_argument("--dry-run", action="store_true", help="Print the plan without moving or rewriting files.")
+    ap.add_argument(
+        "--summary-chars",
+        type=int,
+        default=ARCHIVE_SUMMARY_CHARS,
+        help=f"Summary budget kept in each stub. Defaults to {ARCHIVE_SUMMARY_CHARS}.",
+    )
+    ap.set_defaults(func=cmd_archive_adopt)
+
+    ap = archive_sub.add_parser("restore", help="Move an archived record back into history/ and drop its stub.")
+    ap.add_argument("--record", required=True, help="Record id, stub path, or archived path.")
+    ap.set_defaults(func=cmd_archive_restore)
+
+    ap = archive_sub.add_parser("status", help="Show archive counts, stub counts, and current candidates.")
+    add_archive_policy(ap)
+    ap.add_argument("--limit", type=int, default=12)
+    ap.set_defaults(func=cmd_archive_status)
+
+    ap = archive_sub.add_parser("migrate", help=f"Move a legacy {HISTORY_DIR}/{LEGACY_ARCHIVE_DIR}/ folder into {ARCHIVE_DIR}/.")
+    ap.add_argument("--dry-run", action="store_true")
+    ap.set_defaults(func=cmd_archive_migrate)
 
     p = sub.add_parser("collab", help="Manage maintainer-curated collaboration history.")
     collab_sub = p.add_subparsers(dest="collab_command", required=True)
@@ -3433,7 +5170,10 @@ def build_parser() -> argparse.ArgumentParser:
     cp.add_argument("--strict", action="store_true", help="Fail on sensitive-looking fields instead of warning.")
     cp.set_defaults(func=cmd_collab_promote)
 
-    cp = collab_sub.add_parser("archive", help="Move promoted or stale auxiliary records into history/archive.")
+    cp = collab_sub.add_parser(
+        "archive",
+        help=f"Move promoted or stale auxiliary records into {ARCHIVE_DIR}/ without leaving a stub.",
+    )
     cp.add_argument(
         "--older-than-days",
         type=int,

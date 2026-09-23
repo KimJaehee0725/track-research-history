@@ -21,10 +21,86 @@ Use this reference when deciding where to store or find project memory.
 - `history/tasks/<task-id>/context.md`: accepted context for one benchmark task, including owner, metric, dataset, blocker, risks, and next steps.
 - `history/tasks/<task-id>/workstreams/<name>.md`: accepted context for a task workstream such as data, eval, model, or writeup.
 - `history/inbox/YYYY-MM-DD-HHMMSS-task-workstream-person-agent-title.md`: submitted summary-only `.md` record. Not canonical until promoted.
-- `history/archive/README.md`: archive policy. Archive is tracked for provenance but excluded from default collaboration recall.
-- `history/archive/inbox/YYYY-MM/`: accepted inbox summaries after they have been promoted and archived.
-- `history/archive/daily/YYYY-MM/`: older daily logs moved out of the active daily folder.
-- `history/archive/sessions/YYYY-MM/`: older session notes moved out of the active sessions folder.
+- `history-archive/README.md`: archive policy. The archive is tracked in Git for provenance but excluded from default recall, from the Obsidian vault, and from the default BM25 index.
+- `history-archive/INDEX.md`: generated table of archived records with record id, kind, date, title, and paired commits.
+- `history-archive/YYYY-MM/<kind>/<record>.md`: the full text of an archived record. The month comes from the record date, not the file mtime.
+- `history/<kind>/<record>.md` with `Archive State: stub`: the summary left in place when a record is archived. It keeps the record id, metadata, paired commits, a condensed summary, and an `Archived To:` pointer.
+
+## Record Identity And Commit Pairing
+
+Every record written by the script carries:
+
+- `Record Id:` - a stable id derived from the record kind and filename, such as `chg-2026-05-09-101500-add-reward-export` or `dec-0003-restore-repository-local-markdown-memory`. Commands that take `--record` accept the full id, a repo-relative path, or a unique fragment.
+- `Commits:` metadata plus a `## Commits` section - the Git commits that implemented the record. Empty records show `-`.
+
+Commits point back with a `History-Record: <record-id>` trailer, so the link survives file moves and renames.
+
+```bash
+python3 <skill-dir>/scripts/history.py commit --record <id> --message "..." --path <file>
+python3 <skill-dir>/scripts/history.py commit --record <id> --message "..." --all
+python3 <skill-dir>/scripts/history.py link-commit --record <id> --commit <sha>
+python3 <skill-dir>/scripts/history.py sync-commits
+python3 <skill-dir>/scripts/history.py commits --record <id> --stat
+python3 <skill-dir>/scripts/history.py commits --commit <sha>
+```
+
+`commit` stages the requested paths, writes the trailer, writes the commit id back into the record, and then adds a small bookkeeping commit for that record update; `--no-record-commit` leaves the record edit uncommitted instead. `link-commit` pairs a commit that already exists and defaults to `HEAD`; it only rewrites Git history when `--amend-trailer` is passed, and it refuses to amend when changes are staged. `sync-commits` rebuilds pairing from trailers after rebases, cherry-picks, or hand-written commits.
+
+Record creation commands (`change`, `decision`, `idea`, `experiment`, `handoff`) also accept `--commit <sha>` when the commit already exists.
+
+## Long-Term Archive
+
+Long projects outgrow what an agent should load. Archiving trades full text for a summary stub:
+
+- The full record moves to `history-archive/YYYY-MM/<kind>/<record>.md` with `Archived: yes`, `Archived From:`, and `Archive Stub:` metadata.
+- The original path keeps a stub with `Archive State: stub`, `Archived To:`, the record id, the paired commits, and a `## Summary` section condensed from the record's own sections.
+- Nothing is deleted, and `archive restore --record <id>` reverses the move exactly.
+
+```bash
+python3 <skill-dir>/scripts/history.py archive status
+python3 <skill-dir>/scripts/history.py archive plan --older-than-days 180
+python3 <skill-dir>/scripts/history.py archive run
+python3 <skill-dir>/scripts/history.py archive run --record <id>
+python3 <skill-dir>/scripts/history.py archive restore --record <id>
+python3 <skill-dir>/scripts/history.py archive migrate
+```
+
+Default policy: kinds `changes, experiments, daily, sessions, handoffs, capsules, inbox`; older than 60 days; keep the newest 20 per kind; skip records still marked open, in-progress, or proposed; skip records that `CONTEXT.md`, `canonical/`, or `tasks/` still link to, since curated context pointing at a record is the available signal that it is still in use; skip records whose stub would not be meaningfully smaller than the record. `decisions` and `ideas` are excluded by default because they stay canonical; add them with `--include`. Override any of it with `--include`, `--older-than-days`, `--keep-recent`, `--min-saving`, `--include-open`, and `--include-referenced`.
+
+The saving guard is measured rather than estimated. For each candidate the script builds the stub it would write and requires it to be at least `--min-saving` (default 0.30) and 400 characters smaller than the record. This matters more than it sounds: a stub carries frontmatter, a metadata block, a summary, a commit list, and a pointer, which costs roughly 1.6-1.9k characters. Records around 1.3-1.5k characters therefore grow when archived. `archive plan`, `archive status`, and `archive adopt` report how many records were skipped for this reason, so "no candidates" is a finding, not silence.
+
+Record age comes from the record date (filename stamp, then `Date:` metadata), not the file mtime, so cloning or copying a repository does not change what is considered old.
+
+Archived text stays out of default retrieval. Add `--include-archive` to `search`, `exact`, `start`, `recall`, or `collab recall` when you need it, and read `history-archive/INDEX.md` for the catalogue. Search output labels each hit with `archive_status=active|stub|archived`.
+
+`archive migrate` moves a legacy `history/archive/` tree from earlier versions of this skill into `history-archive/`. The legacy folder stays readable for search and provenance until it is migrated.
+
+### Applying This To An Existing History
+
+Run `archive adopt` once. The steady-state policy keeps the newest 20 records per kind, which is correct for an active project and leaves a first adoption with nothing to do; `adopt` drops that guard, migrates a legacy `history/archive/` folder, archives the whole backlog past the age window in one pass, and prints the resulting reduction. It keeps the guards that serve the same goal (open records, records linked from curated context, records whose stub would not be smaller than the record) and is safe to re-run. On a history whose records are all short it correctly archives nothing and says so.
+
+```bash
+python3 <skill-dir>/scripts/history.py archive adopt --dry-run
+python3 <skill-dir>/scripts/history.py archive adopt
+python3 <skill-dir>/scripts/history.py sync-commits
+```
+
+Records written by earlier versions of this skill need no rewrite. `Record Id:` is derived from the record kind and filename when the field is absent, and a `## Commits` section is created on first pairing, so `--record <id>`, `archive run`, and `sync-commits` all work against old records as they are.
+
+Measured on synthetic histories (Apple silicon, warm cache), with the default 60-day policy:
+
+| History size | one-time archive | Recall surface before -> after | `search` before -> after |
+| --- | --- | --- | --- |
+| 718 records, 121 commits | `archive run` 1.0s / 493 records | 4.55M -> 1.15M chars (-75%) | 0.95s -> 0.62s |
+| 707 records, 6 months | `archive adopt` 0.9s / 393 records | 3.41M -> 1.51M chars (-56%) | - |
+| 19 records, this skill's own history | `archive adopt` archives nothing | unchanged, by design | - |
+| 2455 records, 121 commits | `archive run` 3.5s / 1716 records | 17.97M -> 6.10M chars (-66%) | 2.36s -> 1.42s |
+
+`search --include-archive` reads both the stubs and the full texts, so it costs slightly more than the unarchived history did (3.37s in the larger case). That is the intended trade: the default path gets cheaper, and the complete corpus stays one flag away.
+
+The one-time cost is a large commit, not a long wait: `archive run` rewrites each archived record in place as a stub and adds its full text under `history-archive/`, so a first run on a long project touches two files per archived record. Run `archive plan` first, commit the move on its own, and use `archive restore --record <id>` if a record turns out to be needed again.
+
+`sync-commits` and `finish` read the commit log in a single `git log` pass and build their record index once, so their cost scales with the number of records read, not with commits multiplied by records.
 
 ## Record Quality
 
@@ -58,7 +134,7 @@ tags: [history, change]
 ---
 ```
 
-Collaboration records also include frontmatter fields such as `task`, `workstream`, `approval_status`, `promoted_to`, `archived`, and `archived_date` when available. The existing plain markdown metadata block remains in the body so agents and simple text tools can keep working without an Obsidian dependency.
+Records also carry `record_id`, and `commits` once paired. Archived records add `archived`, `archived_date`, `archived_from`, and `archive_stub`; stubs add `archive_state: stub` and `archived_to`. Collaboration records also include frontmatter fields such as `task`, `workstream`, `approval_status`, and `promoted_to` when available. The existing plain markdown metadata block remains in the body so agents and simple text tools can keep working without an Obsidian dependency.
 
 Use wiki links only when they point to durable history notes. Prefer unambiguous note names or explicit paths such as `[[decisions/0001-example]]`.
 
@@ -84,6 +160,7 @@ python3 <skill-dir>/scripts/history.py recall --limit 8
 python3 <skill-dir>/scripts/history.py recall --query "normalization" --limit 10
 python3 <skill-dir>/scripts/history.py search "gain_normalized" --limit 20
 python3 <skill-dir>/scripts/history.py exact "gain_normalized" --limit 20
+python3 <skill-dir>/scripts/history.py search "gain_normalized" --include-archive
 ```
 
 Use exact field names, file names, method names, experiment ids, figure names, or paper-section names as queries.
@@ -113,13 +190,13 @@ python3 <skill-dir>/scripts/history.py collab recall --task task-01 --workstream
 python3 <skill-dir>/scripts/history.py collab status
 ```
 
-`collab recall` is intentionally scoped: canonical overview, selected task context, selected workstream context, accepted decisions, and BM25 hits from that accepted scope. Accepted decisions are records marked with either `Status: accepted` or `Approval Status: accepted`. Handoffs and capsules join scoped collaboration recall only when they include task/workstream metadata such as `Task:` and `Workstream:`. It excludes `history/inbox/` and `history/archive/` by default. Pass `--include-inbox` only when you intentionally want to inspect unaccepted summaries, and treat `approval=submitted` output as noncanonical. Pass `--include-archive` only when you need provenance search over archived records; output labels each hit with `kind`, `approval`, and `archive_status`.
+`collab recall` is intentionally scoped: canonical overview, selected task context, selected workstream context, accepted decisions, and BM25 hits from that accepted scope. Accepted decisions are records marked with either `Status: accepted` or `Approval Status: accepted`. Handoffs and capsules join scoped collaboration recall only when they include task/workstream metadata such as `Task:` and `Workstream:`. It excludes `history/inbox/` and the archive by default. Pass `--include-inbox` only when you intentionally want to inspect unaccepted summaries, and treat `approval=submitted` output as noncanonical. Pass `--include-archive` only when you need provenance search over archived records; output labels each hit with `kind`, `approval`, and `archive_status`.
 
 `collab submit-summary` should contain summary, claims, evidence, changed files, validation, open questions, and proposed decisions. It should not contain raw transcripts, credentials, private notes, or personal data. Sensitive-looking content produces warnings; `--strict` turns those warnings into failures.
 
 `collab promote` is the PR-review gate. The `--inbox` input must be a `.md` file inside `history/inbox/`; it does not accept directories, non-markdown files, or arbitrary files outside the inbox. Maintainers can append curated updates to `canonical/overview.md`, a task context, a workstream context, or create an accepted decision in `decisions/`. `--note` is curated-only promotion, and submitted sections are appended only when `--include-submitted-sections` is passed. Promotion also marks the inbox record as accepted and records the target path.
 
-`collab archive` is the cleanup gate. By default it moves inbox summaries marked `Approval Status: accepted` with a non-empty `Promoted To:` into `history/archive/inbox/YYYY-MM/`. `--older-than-days N` filters by file age, and `--include inbox,daily,sessions` can also archive older daily logs and session notes. `--dry-run` prints the move plan without editing files. The command does not delete records.
+`collab archive` is the promotion cleanup gate, separate from the long-term `archive` commands: it moves promoted inbox summaries out whole, without leaving a stub, because the accepted content already lives in canonical, task, or workstream context. By default it moves inbox summaries marked `Approval Status: accepted` with a non-empty `Promoted To:` into `history-archive/YYYY-MM/inbox/`. `--older-than-days N` filters by file age, and `--include inbox,daily,sessions` can also archive older daily logs and session notes. `--dry-run` prints the move plan without editing files. The command does not delete records.
 
 Collaboration records should keep this top metadata when applicable:
 
@@ -158,7 +235,7 @@ python3 <skill-dir>/scripts/history.py finish
 python3 <skill-dir>/scripts/history.py finish --strict
 ```
 
-`finish` prints git status, runs history lint without creating records, and warns when non-history files changed but no visible history record changed. It does not infer or create the record automatically; create the narrowest useful `change`, `decision`, `idea`, `experiment`, `handoff`, or `handoff-agent-capsule` yourself.
+`finish` prints git status, runs history lint without creating records, and warns when non-history files changed but no visible history record changed. It also reports change/experiment records with no paired commit, commits whose `History-Record:` trailer no record lists, uncommitted work past the commit thresholds (12 files or 90 minutes), and how many records are due for archiving. It does not infer or create the record automatically; create the narrowest useful `change`, `decision`, `idea`, `experiment`, `handoff`, or `handoff-agent-capsule` yourself.
 
 ## Handoff Agent Capsule Shape
 

@@ -6,6 +6,7 @@ status: completed
 tags: [history, change]
 agent: codex
 record_id: chg-2026-09-23-104430-history-archive-summary-stub-record-commit-pairing
+commits: 30428ed2fc54
 ---
 # Change - history-archive summary stub과 record-commit pairing 추가
 
@@ -13,6 +14,7 @@ Date: 2026-09-23 10:44 +0900
 Agent: codex
 Status: completed
 Record Id: chg-2026-09-23-104430-history-archive-summary-stub-record-commit-pairing
+Commits: 30428ed2fc54
 
 ## Why
 
@@ -66,3 +68,7 @@ scripts/history.py에 archive plan/run/restore/status/migrate와 commit/link-com
 - 후보가 0건일 때 "절감이 안 되어 N건 건너뜀"을 출력하도록 해서 침묵이 아니라 근거 있는 결론이 되게 했다.
 - 결과: 이 저장소는 19건 전부 건너뛰고 "이미 충분히 싸다"고 보고한다. 합성 장기 저장소(707 레코드)는 393건 아카이빙, recall surface -55.7%로 그대로 동작한다.
 - 교훈: 요약 기반 아카이빙은 기록 하나가 충분히 클 때만 이득이다. 기록이 짧은 프로젝트에는 적용하지 않는 것이 맞다.
+
+## Commits
+
+- `30428ed2fc54` 2026-09-23 11:57 - Add history-archive summary stubs and record-commit pairing

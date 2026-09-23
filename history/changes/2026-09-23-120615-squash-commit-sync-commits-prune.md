@@ -6,6 +6,7 @@ status: completed
 tags: [history, change]
 agent: codex
 record_id: chg-2026-09-23-120615-squash-commit-sync-commits-prune
+commits: 7c3b48bfc8a0
 ---
 # Change - squash 머지로 끊긴 commit 참조를 sync-commits --prune으로 정리
 
@@ -13,6 +14,7 @@ Date: 2026-09-23 12:06 +0900
 Agent: codex
 Status: completed
 Record Id: chg-2026-09-23-120615-squash-commit-sync-commits-prune
+Commits: 7c3b48bfc8a0
 
 ## Why
 
@@ -38,3 +40,7 @@ commit_is_reachable가 git for-each-ref --contains로 도달 가능성을 확인
 ## Risks / Follow-Ups
 
 삭제는 opt-in이다. 로컬에만 있고 아직 push하지 않은 커밋은 어느 ref에도 없으면 도달 불가로 판정되므로, push 전에 --prune을 돌리면 유효한 pair가 지워질 수 있다.
+
+## Commits
+
+- `7c3b48bfc8a0` 2026-09-23 12:06 - Prune commit pairings a squash merge left unreachable

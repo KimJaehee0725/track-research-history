@@ -190,6 +190,15 @@ python3 <skill-dir>/scripts/history.py sync-commits
 
 `link-commit` defaults to `HEAD` and never rewrites Git history unless `--amend-trailer` is passed. `sync-commits` scans commit messages for `History-Record:` trailers and backfills any pairing the records are missing, which repairs drift after rebases, cherry-picks, or hand-written commits.
 
+A squash or rebase merge replaces the commit a record was paired with, so the record ends up pointing at a commit no branch contains. `sync-commits` reports those, and `sync-commits --prune` drops them after adding the replacement:
+
+```bash
+python3 <skill-dir>/scripts/history.py sync-commits          # report unreachable pairs
+python3 <skill-dir>/scripts/history.py sync-commits --prune  # drop them
+```
+
+Run it after merging a pull request that was squashed.
+
 Read the pairing in either direction:
 
 ```bash

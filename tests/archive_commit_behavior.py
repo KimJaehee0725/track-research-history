@@ -335,6 +335,54 @@ class ArchiveAndCommitPairingTests(unittest.TestCase):
         self.assertIn("Linked: 1", out)
         self.assertIn(sha, record.read_text(encoding="utf-8"))
 
+    def test_sync_commits_prunes_references_a_squash_merge_left_behind(self) -> None:
+        root, cli = self.with_cli(git_repo=True)
+        cli.run("bootstrap")
+        record = self.add_change(cli, "Squashed work")
+        record_id = "chg-" + record.stem
+        (root / "app.py").write_text("print('hello')\n", encoding="utf-8")
+        git(root, "add", "-A")
+        git(root, "commit", "-m", f"Feature branch commit\n\nHistory-Record: {record_id}")
+        original = git(root, "rev-parse", "HEAD")[:12]
+
+        cli.run("sync-commits")
+        self.assertIn(original, record.read_text(encoding="utf-8"))
+
+        # A squash merge replaces the paired commit with a new one.
+        git(root, "commit", "--amend", "-m", f"Squashed feature (#3)\n\nHistory-Record: {record_id}")
+        squashed = git(root, "rev-parse", "HEAD")[:12]
+        self.assertNotEqual(original, squashed)
+
+        report = cli.run("sync-commits").stdout
+        self.assertIn("Unreachable Commits", report)
+        self.assertIn(original, report)
+        self.assertIn("Re-run with --prune", report)
+        text = record.read_text(encoding="utf-8")
+        self.assertIn(squashed, text)
+        self.assertIn(original, text)
+
+        pruned = cli.run("sync-commits", "--prune").stdout
+        self.assertIn(f"dropped `{original}`", pruned)
+        text = record.read_text(encoding="utf-8")
+        self.assertIn(squashed, text)
+        self.assertNotIn(original, text)
+        self.assertIn(f"Commits: {squashed}", text)
+
+    def test_commits_view_flags_an_unreachable_pair(self) -> None:
+        root, cli = self.with_cli(git_repo=True)
+        cli.run("bootstrap")
+        record = self.add_change(cli, "Dangling pair")
+        record_id = "chg-" + record.stem
+        (root / "app.py").write_text("print('hello')\n", encoding="utf-8")
+        git(root, "add", "-A")
+        git(root, "commit", "-m", f"Work\n\nHistory-Record: {record_id}")
+        cli.run("sync-commits")
+        git(root, "commit", "--amend", "-m", "Rewritten")
+
+        out = cli.run("commits", "--record", record_id).stdout
+        self.assertIn("unreachable", out)
+        self.assertIn("sync-commits --prune", out)
+
     def test_archive_stub_keeps_commit_pairing(self) -> None:
         root, cli = self.with_cli(git_repo=True)
         cli.run("bootstrap")

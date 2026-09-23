@@ -6,7 +6,7 @@ status: completed
 tags: [history, change]
 agent: codex
 record_id: chg-2026-09-23-104430-history-archive-summary-stub-record-commit-pairing
-commits: 30428ed2fc54
+commits: efbc403cb936
 ---
 # Change - history-archive summary stub과 record-commit pairing 추가
 
@@ -14,7 +14,7 @@ Date: 2026-09-23 10:44 +0900
 Agent: codex
 Status: completed
 Record Id: chg-2026-09-23-104430-history-archive-summary-stub-record-commit-pairing
-Commits: 30428ed2fc54
+Commits: efbc403cb936
 
 ## Why
 
@@ -71,4 +71,5 @@ scripts/history.py에 archive plan/run/restore/status/migrate와 commit/link-com
 
 ## Commits
 
-- `30428ed2fc54` 2026-09-23 11:57 - Add history-archive summary stubs and record-commit pairing
+- `efbc403cb936` 2026-09-23 12:02 - Add history-archive summary stubs and record-commit pairing (#3)
+

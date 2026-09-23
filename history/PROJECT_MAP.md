@@ -33,6 +33,7 @@ Open this `history/` directory as an Obsidian vault. These links stay repo-relat
 - [[changes/2026-07-29-174457-obsidian|Change - Obsidian 프로젝트 그래프 허브 자동 생성]]
 - [[changes/2026-08-03-051026-restore-local-bm25s-research-history|Change - Restore local BM25S research history]]
 - [[changes/2026-09-23-104430-history-archive-summary-stub-record-commit-pairing|Change - history-archive summary stub과 record-commit pairing 추가]]
+- [[changes/2026-09-23-120615-squash-commit-sync-commits-prune|Change - squash 머지로 끊긴 commit 참조를 sync-commits --prune으로 정리]]
 
 ## daily
 

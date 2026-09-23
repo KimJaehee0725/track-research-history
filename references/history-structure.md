@@ -46,6 +46,8 @@ python3 <skill-dir>/scripts/history.py commits --commit <sha>
 
 `commit` stages the requested paths, writes the trailer, writes the commit id back into the record, and then adds a small bookkeeping commit for that record update; `--no-record-commit` leaves the record edit uncommitted instead. `link-commit` pairs a commit that already exists and defaults to `HEAD`; it only rewrites Git history when `--amend-trailer` is passed, and it refuses to amend when changes are staged. `sync-commits` rebuilds pairing from trailers after rebases, cherry-picks, or hand-written commits.
 
+Squash and rebase merges replace the commit a record was paired with. The reference still resolves in a local clone that holds the old object, but no branch or tag contains it, so it is gone for everyone else. `sync-commits` checks reachability with `git for-each-ref --contains` and reports such pairs; `sync-commits --prune` drops them once the replacement commit, which carries the same trailer, has been paired. `commits --record <id>` marks an unreachable pair inline. Pruning edits the record and its archived counterpart together, so a stub and its full text stay in step.
+
 Record creation commands (`change`, `decision`, `idea`, `experiment`, `handoff`) also accept `--commit <sha>` when the commit already exists.
 
 ## Long-Term Archive

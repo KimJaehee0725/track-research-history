@@ -1,6 +1,6 @@
 # History Index
 
-Generated: 2026-09-23 11:57 +0900
+Generated: 2026-09-23 12:06 +0900
 
 ## Current Context
 
@@ -25,6 +25,7 @@ Generated: 2026-09-23 11:57 +0900
 
 ### changes
 
+- `history/changes/2026-09-23-120615-squash-commit-sync-commits-prune.md` - Change - squash 머지로 끊긴 commit 참조를 sync-commits --prune으로 정리
 - `history/changes/2026-09-23-104430-history-archive-summary-stub-record-commit-pairing.md` - Change - history-archive summary stub과 record-commit pairing 추가
 - `history/changes/2026-07-24-205354-ssh.md` - Change - 프로필 기반 메모리 접근과 SSH 키 관리 단순화
 - `history/changes/2026-07-21-203225-ssh-ui.md` - Change - SSH 중앙 메모리 서버와 관리 UI 추가
@@ -36,7 +37,6 @@ Generated: 2026-09-23 11:57 +0900
 - `history/changes/2026-05-08-020723-fix-collaboration-workflow-review-findings.md` - Change - Fix collaboration workflow review findings
 - `history/changes/2026-05-08-015408-add-large-scale-collaboration-workflow.md` - Change - Add large-scale collaboration workflow
 - `history/changes/2026-08-03-051026-restore-local-bm25s-research-history.md` - Change - Restore local BM25S research history
-- `history/changes/2026-07-29-174457-obsidian.md` - Change - Obsidian 프로젝트 그래프 허브 자동 생성
 
 ### decisions
 

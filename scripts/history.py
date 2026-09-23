@@ -1467,6 +1467,52 @@ def pair_record_commit(root: Path, path: Path, sha: str) -> bool:
     return paired
 
 
+def commit_is_reachable(root: Path, sha: str) -> bool:
+    """True when the commit is still reachable from a branch or tag.
+
+    A squash or rebase merge replaces the commits a record was paired with, so a
+    reference can resolve locally while no longer being part of any history.
+    """
+    if not resolve_commit(root, sha):
+        return False
+    return bool(git_output(root, ["for-each-ref", "--contains", sha, "--count=1", "--format=%(refname)"]))
+
+
+def drop_commit_from_text(text: str, sha: str) -> str:
+    remaining = [item for item in parse_commit_list(parse_metadata(text).get("commits", "")) if item != sha]
+    text = set_metadata_line(text, "Commits", ", ".join(remaining) if remaining else "-")
+    text = re.sub(rf"^-\s+`{re.escape(sha)}[0-9a-f]*`.*$\n?", "", text, flags=re.MULTILINE)
+    section = extract_section(text, COMMIT_SECTION_HEADING)
+    if not section.strip():
+        pattern = re.compile(rf"^##\s+{re.escape(COMMIT_SECTION_HEADING)}[ \t]*$", re.IGNORECASE | re.MULTILINE)
+        match = pattern.search(text)
+        if match:
+            start = match.end()
+            next_heading = re.search(r"^##\s+", text[start:], flags=re.MULTILINE)
+            end = start + next_heading.start() if next_heading else len(text)
+            text = text[:start] + "\n\n-\n\n" + text[end:].lstrip("\n")
+    return text
+
+
+def unpair_record_commit(root: Path, path: Path, sha: str) -> bool:
+    short = normalize_sha(sha)
+    if short not in record_commits(path):
+        return False
+    text = read_record_text(path)
+    if not text:
+        return False
+    path.write_text(drop_commit_from_text(text, short), encoding="utf-8")
+    if is_archive_stub(path):
+        target = archived_to_value(path)
+        if target:
+            archived = root / target
+            if archived.exists():
+                archived_text = read_record_text(archived)
+                if archived_text:
+                    archived.write_text(drop_commit_from_text(archived_text, short), encoding="utf-8")
+    return True
+
+
 def commit_trailer_block(record_ids: list[str]) -> str:
     return "\n".join(f"{COMMIT_TRAILER_KEY}: {rid}" for rid in record_ids)
 
@@ -4283,7 +4329,8 @@ def cmd_commits(args: argparse.Namespace) -> None:
             print("- none")
         for sha in commits:
             if git_available(root) and resolve_commit(root, sha):
-                print(commit_line(root, sha))
+                suffix = "" if commit_is_reachable(root, sha) else "  <- unreachable; run `sync-commits --prune`"
+                print(commit_line(root, sha) + suffix)
                 if args.stat:
                     stat = git_output(root, ["show", "--stat", "--format=", sha]) or "-"
                     print("")
@@ -4384,6 +4431,27 @@ def cmd_sync_commits(args: argparse.Namespace) -> None:
     if linked == 0:
         print("- nothing new to pair")
     print("")
+
+    stale: list[tuple[Path, str]] = []
+    for record_id, (path, paired) in record_commit_index(root).items():
+        for sha in paired:
+            if not commit_is_reachable(root, sha):
+                stale.append((path, sha))
+    if stale:
+        print("## Unreachable Commits")
+        print("")
+        for path, sha in stale:
+            reachable_note = "squashed, rebased, or removed"
+            if args.prune:
+                unpair_record_commit(root, path, sha)
+                print(f"- dropped `{sha}` from `{rel(root, path)}` ({reachable_note})")
+            else:
+                print(f"- `{rel(root, path)}` lists `{sha}`, which no branch or tag contains ({reachable_note})")
+        if not args.prune:
+            print("")
+            print("Re-run with --prune to drop these references.")
+        print("")
+
     if unknown:
         print("## Unresolved Trailers")
         print("")
@@ -5024,6 +5092,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("sync-commits", help=f"Backfill pairing from {COMMIT_TRAILER_KEY} commit trailers.")
     p.add_argument("--limit", type=int, default=300, help="How many commits to scan.")
+    p.add_argument(
+        "--prune",
+        action="store_true",
+        help="Also drop paired commits that no branch or tag contains, such as after a squash merge.",
+    )
     p.set_defaults(func=cmd_sync_commits)
 
     p = sub.add_parser(

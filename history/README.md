@@ -8,6 +8,7 @@ This folder stores durable project memory for research coding, experiments, idea
 2. `PROJECT_MAP.md` in Obsidian, or `INDEX.md` in a text editor
 3. Latest file in `daily/`
 4. Relevant records from `changes/`, `decisions/`, `ideas/`, `experiments/`, `handoffs/`, `capsules/`, and `sessions/`
+5. For anything older, the summary stubs here and their full text in `../history-archive/`
 
 ## Trusted Context
 
@@ -19,7 +20,13 @@ For collaboration projects, default agent context comes from `canonical/`, `task
 
 ## Archive
 
-`archive/` is tracked for provenance and long-term review, but excluded from collaboration recall unless `--include-archive` is passed. Archive cleanup moves files; it does not delete them.
+Old, rarely used records keep a summary stub here and move their full text to `../history-archive/YYYY-MM/<kind>/`. A stub carries `Archive State: stub`, the record id, the paired commits, a condensed summary, and an `Archived To:` pointer.
+
+The archive is tracked in Git for provenance but excluded from default recall, from this Obsidian vault, and from the default search index. Pass `--include-archive` to search it, or read `../history-archive/INDEX.md`. Nothing is deleted: `history.py archive restore --record <id>` reverses the move.
+
+## Commits
+
+Each record carries a `Record Id:` and a `## Commits` section, and each paired commit carries a `History-Record: <id>` trailer. Use `history.py commits --record <id>` to see the diffs behind a record, and `history.py sync-commits` to rebuild pairing from commit trailers.
 
 ## Obsidian
 

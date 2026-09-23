@@ -6,7 +6,7 @@ status: completed
 tags: [history, change]
 agent: codex
 record_id: chg-2026-09-23-120615-squash-commit-sync-commits-prune
-commits: 7c3b48bfc8a0
+commits: 979368d55b60
 ---
 # Change - squash 머지로 끊긴 commit 참조를 sync-commits --prune으로 정리
 
@@ -14,7 +14,7 @@ Date: 2026-09-23 12:06 +0900
 Agent: codex
 Status: completed
 Record Id: chg-2026-09-23-120615-squash-commit-sync-commits-prune
-Commits: 7c3b48bfc8a0
+Commits: 979368d55b60
 
 ## Why
 
@@ -43,4 +43,5 @@ commit_is_reachable가 git for-each-ref --contains로 도달 가능성을 확인
 
 ## Commits
 
-- `7c3b48bfc8a0` 2026-09-23 12:06 - Prune commit pairings a squash merge left unreachable
+- `979368d55b60` 2026-09-23 12:15 - Prune commit pairings a squash merge left unreachable (#4)
+

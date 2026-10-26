@@ -34,6 +34,7 @@ Open this `history/` directory as an Obsidian vault. These links stay repo-relat
 - [[changes/2026-08-03-051026-restore-local-bm25s-research-history|Change - Restore local BM25S research history]]
 - [[changes/2026-09-23-104430-history-archive-summary-stub-record-commit-pairing|Change - history-archive summary stub과 record-commit pairing 추가]]
 - [[changes/2026-09-23-120615-squash-commit-sync-commits-prune|Change - squash 머지로 끊긴 commit 참조를 sync-commits --prune으로 정리]]
+- [[changes/2026-10-27-001521-git-bm25s-history-1d392c630fd9442b|Change - Git 파일 이력 탐색과 BM25S 근거 검색 및 history 안정성 통합]]
 
 ## daily
 
@@ -48,6 +49,7 @@ Open this `history/` directory as an Obsidian vault. These links stay repo-relat
 - [[daily/2026-07-29|Daily Log - 2026-07-29]]
 - [[daily/2026-08-03|Daily Log - 2026-08-03]]
 - [[daily/2026-09-23|Daily Log - 2026-09-23]]
+- [[daily/2026-10-27|Daily Log - 2026-10-27]]
 
 ## decisions
 

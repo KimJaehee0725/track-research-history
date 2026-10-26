@@ -9,7 +9,7 @@ python3 /path/to/track-research-history/scripts/history.py bootstrap
 python3 /path/to/track-research-history/scripts/history.py start --query "current task"
 python3 /path/to/track-research-history/scripts/history.py search "decision or experiment" --limit 10
 python3 /path/to/track-research-history/scripts/history.py change --title "Describe the change" --why "Why" --how "How"
-python3 /path/to/track-research-history/scripts/history.py commit --record "describe-the-change" --message "Describe the change" --all
+python3 /path/to/track-research-history/scripts/history.py commit --record "describe-the-change" --message "Describe the change" --path path/to/changed-file
 python3 /path/to/track-research-history/scripts/history.py finish
 ```
 
@@ -53,5 +53,29 @@ See [SKILL.md](SKILL.md) for the complete agent workflow and [references/history
 
 ## Requirements
 
-- Python 3.10+
+- Python 3.10+ on POSIX (Linux/macOS), with `fcntl` for writer locks
 - NumPy
+
+## Versioned local installation
+
+Clone this repository and run its tests before installing. Install the same payload into explicit discovery paths to keep Codex and Claude on one version:
+
+```bash
+python3 -m unittest discover -s tests -p '*.py' -q
+python3 scripts/install.py --target "$HOME/.codex/skills/track-research-history" --target "$HOME/.claude/skills/track-research-history" --dry-run
+python3 scripts/install.py --target "$HOME/.codex/skills/track-research-history" --target "$HOME/.claude/skills/track-research-history"
+python3 scripts/history.py --version
+python3 scripts/history.py --capabilities
+```
+
+The installer copies a consistent skill payload, records hashes and the source revision in `INSTALLATION.json`, and preserves each prior directory or symlink as a sibling backup. It does not change a symlink's old target or overwrite a Git checkout. Copy-based installs require reinstalling after a source update. A failed multi-target installation rolls back completed replacements.
+
+## File history and retrieval
+
+```bash
+python3 scripts/history.py commits --file src/module.py --ref HEAD --limit 5
+python3 scripts/history.py search "src/module.py" --json --no-variants
+python3 scripts/history.py finish --base <starting-commit>
+```
+
+See [retrieval-and-provenance.md](references/retrieval-and-provenance.md) for relation types, scope, diagnostics, and limits. Recall is now read-only; `recall --update` explicitly requests the legacy daily/index writes.

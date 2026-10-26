@@ -31,7 +31,7 @@ Use this reference when deciding where to store or find project memory.
 Every record written by the script carries:
 
 - `Record Id:` - a stable id derived from the record kind and filename, such as `chg-2026-05-09-101500-add-reward-export` or `dec-0003-restore-repository-local-markdown-memory`. Commands that take `--record` accept the full id, a repo-relative path, or a unique fragment.
-- `Commits:` metadata plus a `## Commits` section - the Git commits that implemented the record. Empty records show `-`.
+- `Commits:` metadata plus a `## Commits` section - the Git commits associated with the recorded implementation, experiment baseline, or validation. Inspect the record to determine the relationship. Empty records show `-`.
 
 Commits point back with a `History-Record: <record-id>` trailer, so the link survives file moves and renames.
 
@@ -167,9 +167,9 @@ python3 <skill-dir>/scripts/history.py search "gain_normalized" --include-archiv
 
 Use exact field names, file names, method names, experiment ids, figure names, or paper-section names as queries.
 
-Use `start` as the new-session trigger because it is read-only: it prints project context, latest daily notes, recent records, recent handoffs/capsules, and optional BM25 results without creating a daily file or rebuilding `INDEX.md`. Use `recall` when the existing mutating behavior is acceptable or when compatibility with older workflows matters.
+Use `start --brief` as the compact new-session trigger: it prints project context, latest daily notes, recent records, recent handoffs/capsules, and optional BM25 results without creating a daily file or rebuilding `INDEX.md`. Recall is read-only by default; use `recall --update` only when explicitly requesting the legacy daily/index refresh.
 
-BM25 indexing uses virtual chunks rather than treating every file as one large search document. Files up to 2600 characters stay as one chunk. Longer records are split by markdown `##` sections first, then by paragraph groups, with a 2200-character target and about 250 characters of overlap. Each chunk carries the file metadata prefix so task, workstream, approval, and provenance context stay visible. Search output reports the source file, chunk number, heading, line start, approval, and archive status.
+BM25 indexing uses Markdown sections and long-paragraph virtual chunks with bounded overlap. Source metadata stays in separate fields instead of being repeated into every body excerpt. Results are grouped by source file and report the matching body line, heading, status, archive state, explicit relation context, and retrieval diagnostics. See retrieval-and-provenance.md for current query behavior.
 
 The search command performs three steps:
 
@@ -253,3 +253,7 @@ Capsules are optimized for transfer. They should include:
 - Retrieval reflection so the receiving agent can judge whether recall was strong or partial.
 
 Do not store hidden chain-of-thought. Store the actionable rationale: decisions, assumptions, constraints, evidence, and planned checks.
+
+## Retrieval and provenance updates
+
+See [retrieval-and-provenance.md](retrieval-and-provenance.md) for exact identifier protection, grouped body excerpts, read-only file history by Git ref, and structured retrieval limits. Record creation accepts explicit `--corrects`, `--supersedes`, and applicability `--scope`; these leave the prior record intact. New records include observed repository, branch, and full HEAD metadata. Lint also detects duplicate IDs, ambiguous display numbers, missing relation targets, and conflicting YAML/body metadata. Generated maps are exempt from prose-size warnings.

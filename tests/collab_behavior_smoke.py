@@ -603,6 +603,10 @@ class CollabBehaviorSmokeTests(unittest.TestCase):
         old_timestamp = time.time() - (3 * 24 * 60 * 60)
         task_context = root / "history" / "tasks" / "status-task" / "context.md"
         os.utime(task_context, (old_timestamp, old_timestamp))
+        old_date = time.strftime("%Y-%m-%d %H:%M %z", time.localtime(old_timestamp))
+        raw = task_context.read_text(encoding="utf-8")
+        raw = re.sub(r"(?m)^Last Updated:.*$", "Last Updated: " + old_date, raw)
+        task_context.write_text(raw, encoding="utf-8")
 
         status = cli.run("collab", "status", "--stale-days", "1").stdout
         normalized = status.lower()

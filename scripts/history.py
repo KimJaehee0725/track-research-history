@@ -2,20 +2,31 @@
 from __future__ import annotations
 
 import argparse
+import uuid
+import threading
+import tempfile
+import os
+import hashlib
+import functools
+import fcntl
+import contextlib
 import json
 import re
 import subprocess
 import sys
 from collections import Counter
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
+VERSION = "0.6.0"
 HISTORY_DIR = "history"
 ARCHIVE_DIR = "history-archive"
 LEGACY_ARCHIVE_DIR = "archive"
 SCRIPT_DIR = Path(__file__).resolve().parent
 VENDOR_DIR = SCRIPT_DIR / "vendor"
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
 if str(VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(VENDOR_DIR))
 
@@ -57,7 +68,7 @@ ARCHIVE_SUMMARY_CHARS = 700
 ARCHIVE_MIN_SAVING = 0.30
 ARCHIVE_MIN_SAVING_CHARS = 400
 ARCHIVE_ADOPT_HINT_RECORDS = 60
-OPEN_STATUSES = {"open", "in-progress", "in progress", "active", "pending", "todo", "proposed", "draft", "ready"}
+OPEN_STATUSES = {"open", "in-progress", "in progress", "active", "pending", "todo", "proposed", "draft", "ready", "blocked", "partial", "inconclusive", "delivered for review"}
 RECORD_ID_PREFIXES = {
     "changes": "chg",
     "change": "chg",
@@ -150,7 +161,7 @@ def detect_root(explicit: str | None) -> Path:
             ["git", "rev-parse", "--show-toplevel"],
             stderr=subprocess.DEVNULL,
             text=True,
-        ).strip()
+        ).rstrip("\n")
         if out:
             return Path(out).resolve()
     except Exception:
@@ -183,11 +194,76 @@ def value(text: str | None) -> str:
     return text.strip() if text and text.strip() else "-"
 
 
+_HISTORY_LOCKS: dict[str, threading.RLock] = {}
+_HISTORY_LOCK_DEPTH: dict[str, int] = {}
+_HISTORY_LOCKS_GUARD = threading.Lock()
+
+
+@contextlib.contextmanager
+def history_lock(root: Path):
+    """Serialize one worktree's writers without putting runtime state in history/."""
+    key = str(root.resolve())
+    with _HISTORY_LOCKS_GUARD:
+        lock = _HISTORY_LOCKS.setdefault(key, threading.RLock())
+    with lock:
+        depth = _HISTORY_LOCK_DEPTH.get(key, 0)
+        _HISTORY_LOCK_DEPTH[key] = depth + 1
+        handle = None
+        try:
+            if depth == 0:
+                directory = Path(tempfile.gettempdir()) / f"track-research-history-locks-{os.getuid()}"
+                directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+                handle = (directory / (hashlib.sha256(key.encode()).hexdigest() + ".lock")).open("a")
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            yield
+        finally:
+            _HISTORY_LOCK_DEPTH[key] -= 1
+            if handle is not None:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                handle.close()
+
+
+def history_locked(function):
+    @functools.wraps(function)
+    def locked(root: Path, *args, **kwargs):
+        with history_lock(root):
+            return function(root, *args, **kwargs)
+    return locked
+
+
+def atomic_write_text(path: Path, text: str, *, exclusive: bool = False) -> bool:
+    """Publish complete UTF-8 contents; exclusive creation never replaces a note."""
+    if not exclusive and path.exists() and path.read_text(encoding="utf-8") == text:
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    mode = path.stat().st_mode & 0o777 if path.exists() else 0o644
+    descriptor, temporary = tempfile.mkstemp(prefix="." + path.name + ".", dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            os.fchmod(stream.fileno(), mode)
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
+        if exclusive:
+            os.link(temporary, path)
+        else:
+            os.replace(temporary, path)
+        return True
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+
+
 def write_if_missing(path: Path, text: str) -> None:
-    if not path.exists():
-        path.write_text(text, encoding="utf-8")
+    try:
+        atomic_write_text(path, text, exclusive=True)
+    except FileExistsError:
+        pass
 
 
+@history_locked
 def ensure_history(root: Path) -> None:
     history = root / HISTORY_DIR
     for name in RECORD_DIRS:
@@ -688,7 +764,7 @@ def ensure_collab(root: Path) -> None:
             "Canonical Research Overview",
             {"approval_status": "accepted", "archived": False},
         )
-        overview.write_text(text, encoding="utf-8")
+        atomic_write_text(overview, text)
     write_if_missing(
         history / "tasks" / "README.md",
         """# Collaboration Tasks
@@ -783,7 +859,7 @@ def ensure_collab_task(root: Path, task: str, workstreams: list[str] | None = No
             .replace("{{date}}", display_time())
         )
         text = add_obsidian_frontmatter(text, "task-context", f"Task {task_id} Context")
-        context.write_text(text, encoding="utf-8")
+        atomic_write_text(context, text)
     for workstream in workstreams or []:
         path = workstream_context_path(root, task_id, workstream)
         if not path.exists():
@@ -801,7 +877,7 @@ def ensure_collab_task(root: Path, task: str, workstreams: list[str] | None = No
                 f"Workstream {normalize_collab_id(workstream, 'workstream')} Context",
             )
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(text, encoding="utf-8")
+            atomic_write_text(path, text)
 
 
 def detect_sensitive_warnings(named_texts: list[tuple[str, str | None]]) -> list[str]:
@@ -944,7 +1020,7 @@ def add_obsidian_frontmatter(
         if tag not in tags:
             tags.append(tag)
     fields["tags"] = tags
-    for key in ["task", "workstream", "agent", "person"]:
+    for key in ["task", "workstream", "agent", "person", "scope", "corrects", "supersedes", "superseded by", "repository", "git branch", "git head"]:
         if meta.get(key) and meta[key] != "-":
             fields[key] = meta[key]
     for key in ["approval status", "promoted to", "archived date", "archived from"]:
@@ -1112,6 +1188,7 @@ def update_last_updated(text: str) -> str:
     return set_metadata_line(text, "Last Updated", display_time())
 
 
+@history_locked
 def today_file(root: Path) -> Path:
     ensure_history(root)
     path = root / HISTORY_DIR / "daily" / f"{date_stamp()}.md"
@@ -1124,7 +1201,7 @@ def today_file(root: Path) -> Path:
             f"Daily Log - {date_stamp()}",
             {"date": date_stamp(), "tags": ["history", "daily"]},
         )
-        path.write_text(text, encoding="utf-8")
+        atomic_write_text(path, text)
     else:
         text = path.read_text(encoding="utf-8")
         if not has_frontmatter(text):
@@ -1134,10 +1211,11 @@ def today_file(root: Path) -> Path:
                 f"Daily Log - {date_stamp()}",
                 {"date": date_stamp(), "tags": ["history", "daily"]},
             )
-            path.write_text(text, encoding="utf-8")
+            atomic_write_text(path, text)
     return path
 
 
+@history_locked
 def append_daily(root: Path, kind: str, title: str, record_path: Path) -> None:
     path = today_file(root)
     line = f"- {short_time()} [{kind}] {title} -> `{rel(root, record_path)}`\n"
@@ -1147,7 +1225,7 @@ def append_daily(root: Path, kind: str, title: str, record_path: Path) -> None:
         text = text.replace(marker, marker + "\n" + line, 1)
     else:
         text = text.rstrip() + "\n\n## Linked Records\n\n" + line
-    path.write_text(text, encoding="utf-8")
+    atomic_write_text(path, text)
 
 
 def next_id(folder: Path) -> str:
@@ -1202,57 +1280,42 @@ def record_id_for(path: Path) -> str:
 
 
 def record_datetime(path: Path) -> datetime:
-    """Record date from the filename, then metadata, then file mtime."""
-    try:
-        cache_key = (str(path.resolve()), path.stat().st_mtime)
-    except OSError:
-        cache_key = (str(path), 0.0)
-    cached = _RECORD_DATE_CACHE.get(cache_key)
-    if cached is not None:
-        return cached
-
-    stamp: datetime | None = None
-    match = re.search(r"(\d{4})-(\d{2})-(\d{2})(?:-(\d{2})(\d{2})(\d{2}))?", path.name)
+    """Creation date from filename/metadata, preserving an explicit UTC offset."""
+    meta = record_metadata(path)
+    metadata_stamp: datetime | None = None
+    for key in ["date", "date imported", "archived date", "promoted date", "last updated"]:
+        raw = (meta.get(key, "") or "").split(" #", 1)[0].strip()
+        try:
+            candidate = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        metadata_stamp = candidate if candidate.tzinfo else candidate.replace(tzinfo=timezone.utc)
+        break
+    # Only a leading date is an identity date; dates inside a title are not.
+    match = re.match(r"^(\d{4})-(\d{2})-(\d{2})(?:-(\d{2})(\d{2})(\d{2}))?", path.name)
     if match:
         try:
-            stamp = datetime(
-                int(match.group(1)),
-                int(match.group(2)),
-                int(match.group(3)),
-                int(match.group(4) or 0),
-                int(match.group(5) or 0),
-                int(match.group(6) or 0),
-            ).astimezone()
+            offset = metadata_stamp.tzinfo if metadata_stamp else timezone.utc
+            return datetime(*(int(match.group(i) or 0) for i in range(1, 7)), tzinfo=offset)
         except ValueError:
-            stamp = None
-    if stamp is None:
-        meta = record_metadata(path)
-        for key in ["date", "archived date", "promoted date", "last updated"]:
-            found = re.search(r"(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2}))?", meta.get(key, "") or "")
-            if not found:
-                continue
-            try:
-                stamp = datetime(
-                    int(found.group(1)),
-                    int(found.group(2)),
-                    int(found.group(3)),
-                    int(found.group(4) or 0),
-                    int(found.group(5) or 0),
-                ).astimezone()
-                break
-            except ValueError:
-                continue
-    if stamp is None:
-        try:
-            stamp = datetime.fromtimestamp(path.stat().st_mtime).astimezone()
-        except OSError:
-            stamp = now()
-    _RECORD_DATE_CACHE[cache_key] = stamp
-    return stamp
+            pass
+    if metadata_stamp:
+        return metadata_stamp
+    # Administrative/generated notes have no creation date and must not look recent
+    # merely because checkout or index regeneration touched them.
+    if path.name in {"INDEX.md", "README.md", OBSIDIAN_MAP_FILE, "CONTEXT.md"}:
+        return datetime.min.replace(tzinfo=timezone.utc)
+    try:
+        return datetime.fromtimestamp(path.stat().st_mtime, timezone.utc)
+    except OSError:
+        return datetime.min.replace(tzinfo=timezone.utc)
 
 
-def record_sort_key(path: Path) -> float:
-    return record_datetime(path).timestamp()
+def record_sort_key(path: Path) -> tuple[float, str]:
+    stamp = record_datetime(path)
+    # datetime.min.timestamp() is platform dependent, ordinal arithmetic is not.
+    seconds = (stamp - datetime(1970, 1, 1, tzinfo=timezone.utc)).total_seconds()
+    return seconds, path.as_posix()
 
 
 def record_status(path: Path) -> str:
@@ -1264,7 +1327,8 @@ def record_status(path: Path) -> str:
 
 
 def record_is_open(path: Path) -> bool:
-    return record_status(path) in OPEN_STATUSES
+    status = record_status(path)
+    return status in OPEN_STATUSES or status.startswith(("blocked-", "blocked on", "implemented;"))
 
 
 def record_search_paths(root: Path) -> list[Path]:
@@ -1278,13 +1342,19 @@ def find_record(root: Path, ref: str) -> Path:
         raise SystemExit("Record reference is empty.")
     direct = Path(ref) if Path(ref).is_absolute() else root / ref
     if direct.is_file() and direct.suffix == ".md":
+        resolved = direct.resolve()
+        if not any(is_relative_to(resolved, folder.resolve()) for folder in (root / HISTORY_DIR, archive_root(root))):
+            raise SystemExit("Record paths must stay inside this repository's history or history-archive.")
         return direct
     needle = ref.lower()
     candidates = record_search_paths(root)
     exact = [path for path in candidates if record_id_for(path).lower() == needle]
     if exact:
         live = [path for path in exact if not in_archive_tree(path)]
-        return (live or exact)[0]
+        eligible = live or exact
+        if len(eligible) != 1:
+            raise SystemExit(f"Ambiguous duplicate record id '{ref}'; select a full path and repair the duplicate.")
+        return eligible[0]
     partial = [
         path
         for path in candidates
@@ -1447,7 +1517,7 @@ def write_commit_reference(root: Path, path: Path, sha: str) -> bool:
     commits.append(short)
     text = set_metadata_line(text, "Commits", ", ".join(commits))
     text = append_to_section(text, COMMIT_SECTION_HEADING, commit_line(root, sha))
-    path.write_text(text, encoding="utf-8")
+    atomic_write_text(path, text)
     return True
 
 
@@ -1501,7 +1571,7 @@ def unpair_record_commit(root: Path, path: Path, sha: str) -> bool:
     text = read_record_text(path)
     if not text:
         return False
-    path.write_text(drop_commit_from_text(text, short), encoding="utf-8")
+    atomic_write_text(path, drop_commit_from_text(text, short))
     if is_archive_stub(path):
         target = archived_to_value(path)
         if target:
@@ -1509,7 +1579,7 @@ def unpair_record_commit(root: Path, path: Path, sha: str) -> bool:
             if archived.exists():
                 archived_text = read_record_text(archived)
                 if archived_text:
-                    archived.write_text(drop_commit_from_text(archived_text, short), encoding="utf-8")
+                    atomic_write_text(archived, drop_commit_from_text(archived_text, short))
     return True
 
 
@@ -1631,6 +1701,7 @@ def commit_due_notes(root: Path) -> list[str]:
     return notes
 
 
+@history_locked
 def write_record(
     root: Path,
     folder: str,
@@ -1641,8 +1712,28 @@ def write_record(
     commits: list[str] | None = None,
 ) -> Path:
     ensure_history(root)
-    out = root / HISTORY_DIR / folder / filename
-    record_id = compose_record_id(folder, Path(filename).stem)
+    directory = root / HISTORY_DIR / folder
+    proposed = Path(filename)
+    numeric = re.match(r"^(\d{4})-(.+)$", proposed.stem)
+    if folder in {"decisions", "ideas", "experiments"} and numeric and any(directory.glob(numeric.group(1) + "-*.md")):
+        replacement = next_id(directory)
+        text = re.sub(r"(?m)^(# (?:Decision|Idea|Experiment) )" + re.escape(numeric.group(1)) + r"(?= -)", lambda match: match.group(1) + replacement, text)
+        proposed = proposed.with_name(replacement + "-" + numeric.group(2) + proposed.suffix)
+    # UUID suffix also avoids identity collisions between separate worktrees.
+    out = directory / f"{proposed.stem}-{uuid.uuid4().hex[:16]}{proposed.suffix}"
+    record_id = compose_record_id(folder, out.stem)
+    observed = parse_metadata(text)
+    if git_available(root):
+        common = git_output(root, ["rev-parse", "--git-common-dir"])
+        common_path = (root / common).resolve() if common else root / ".git"
+        observations = {
+            "Repository": common_path.parent.name,
+            "Git Branch": git_output(root, ["symbolic-ref", "--quiet", "--short", "HEAD"]) or "detached",
+            "Git Head": resolve_commit(root, "HEAD") or "unborn",
+        }
+        for key, observation in observations.items():
+            if metadata_key(key) not in observed:
+                text = set_metadata_line(text, key, observation)
     text = set_metadata_line(text, "Record Id", record_id)
     resolved: list[str] = []
     for ref in commits or []:
@@ -1659,20 +1750,29 @@ def write_record(
     if resolved:
         extra["commits"] = resolved
     text = add_obsidian_frontmatter(text, kind, title, extra)
-    out.write_text(text, encoding="utf-8")
+    # An external writer may not honor our lock. Exclusive publication still
+    # protects its file and retries rather than overwriting it.
+    while True:
+        try:
+            atomic_write_text(out, text, exclusive=True)
+            break
+        except FileExistsError:
+            out = directory / f"{proposed.stem}-{uuid.uuid4().hex[:16]}{proposed.suffix}"
+            record_id = compose_record_id(folder, out.stem)
+            text = set_metadata_line(text, "Record Id", record_id)
     append_daily(root, kind, title, out)
     build_index(root)
     print(rel(root, out))
     return out
 
 
+@history_locked
 def build_index(root: Path) -> Path:
     ensure_history(root)
     history = root / HISTORY_DIR
     lines = [
         "# History Index",
         "",
-        f"Generated: {display_time()}",
         "",
         "## Current Context",
         "",
@@ -1683,7 +1783,7 @@ def build_index(root: Path) -> Path:
         "",
     ]
     for folder in ["daily", "changes", "decisions", "ideas", "experiments", "handoffs", "capsules", "sessions"]:
-        files = sorted((history / folder).glob("*.md"), key=lambda p: p.stat().st_mtime, reverse=True)
+        files = sorted((history / folder).glob("*.md"), key=record_sort_key, reverse=True)
         lines.append(f"### {folder}")
         lines.append("")
         if not files:
@@ -1701,7 +1801,7 @@ def build_index(root: Path) -> Path:
     lines.append("")
     if not collab_files:
         lines.append("- none")
-    for path in sorted(collab_files, key=lambda p: p.stat().st_mtime, reverse=True)[:30]:
+    for path in sorted(collab_files, key=record_sort_key, reverse=True)[:30]:
         title = first_heading(path)
         lines.append(f"- `{rel(root, path)}` - {title} (approval={approval_status(path)})")
     lines.append("")
@@ -1728,7 +1828,7 @@ def build_index(root: Path) -> Path:
         )
     lines.append("")
     out = history / "INDEX.md"
-    out.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+    atomic_write_text(out, "\n".join(lines).rstrip() + "\n")
     build_obsidian_map(root)
     build_archive_index(root)
     return out
@@ -1751,6 +1851,7 @@ def obsidian_map_paths(root: Path) -> list[Path]:
     return sorted(paths, key=lambda path: path.relative_to(history).as_posix())
 
 
+@history_locked
 def build_obsidian_map(root: Path) -> Path:
     ensure_history(root)
     history = root / HISTORY_DIR
@@ -1782,7 +1883,7 @@ def build_obsidian_map(root: Path) -> Path:
     out = history / OBSIDIAN_MAP_FILE
     content = "\n".join(lines).rstrip() + "\n"
     if not out.exists() or out.read_text(encoding="utf-8") != content:
-        out.write_text(content, encoding="utf-8")
+        atomic_write_text(out, content)
     return out
 
 
@@ -1995,47 +2096,76 @@ def search_documents_for_file(
     approval: str,
     archive_state: str,
 ) -> list[dict[str, str]]:
+    """Index evidence bodies, not copied retrieval output or repeated YAML prefixes."""
     relative_path = rel(root, path)
     title = first_heading(path)
     kind = record_kind(path)
-    path_terms = split_identifier_text(relative_path)
-    title_terms = split_identifier_text(title)
-    docs: list[dict[str, str]] = []
-    for chunk in record_text_chunks(raw):
-        heading = chunk["heading"]
-        heading_terms = split_identifier_text(heading)
-        weighted_text = "\n".join(
-            [
-                title,
-                title_terms,
-                title_terms,
-                heading,
-                heading_terms,
-                relative_path,
-                path_terms,
-                path_terms,
-                kind,
-                kind,
-                approval,
-                archive_state,
-                chunk["text"],
-            ]
-        )
-        docs.append(
-            {
-                "path": relative_path,
-                "title": title,
+    meta = parse_metadata(raw)
+    noise_sections = {
+        "bm25 query generation", "generated queries", "retrieval reflection",
+        "read these records first", "project context snapshot", "git status snapshot",
+        "linked records",
+    }
+    chunks = []
+    for heading, section, offset in markdown_sections(raw):
+        if heading.lower() in noise_sections:
+            continue
+        if section.startswith("## "):
+            header_end = section.find("\n")
+            offset += header_end + 1
+            section = section[header_end + 1:]
+        elif not re.search(r"^##\s+", raw, flags=re.MULTILINE):
+            # A short note without sections still has a metadata header.
+            body = strip_frontmatter(section)
+            skipped = section.find(body)
+            offset += max(0, skipped)
+            section = body
+        for span_start, span_end in split_text_spans(section, CHUNK_TARGET_CHARS, CHUNK_OVERLAP_CHARS):
+            body = section[span_start:span_end]
+            leading = len(body) - len(body.lstrip())
+            body = body.strip()
+            if not body or body == "-":
+                continue
+            chunks.append({
+                "text": body,
                 "heading": heading,
-                "line_start": chunk["line_start"],
-                "chunk_id": chunk["chunk_id"],
-                "chunk_count": chunk["chunk_count"],
-                "kind": kind,
-                "approval": approval,
-                "archive_status": archive_state,
-                "text": chunk["text"],
-                "index_text": weighted_text,
-            }
+                "line_start": str(line_number_at(raw, offset + span_start + leading)),
+            })
+    docs = []
+    for idx, chunk in enumerate(chunks, 1):
+        heading = chunk["heading"]
+        body_identifiers = query_identifiers(chunk["text"])
+        identifier_terms = " ".join(
+            " ".join([identifier.rsplit("/", 1)[-1], split_identifier_text(identifier)])
+            for identifier in body_identifiers
         )
+        weighted_text = "\n".join([
+            title, split_identifier_text(title), heading,
+            relative_path, split_identifier_text(relative_path), chunk["text"], identifier_terms,
+        ])
+        doc = {
+            "path": relative_path, "title": title, "heading": heading,
+            "line_start": chunk["line_start"], "chunk_id": str(idx),
+            "chunk_count": str(len(chunks)), "kind": kind,
+            "approval": approval, "archive_status": archive_state,
+            "text": chunk["text"], "index_text": weighted_text,
+            "date": meta.get("date", ""), "status": meta.get("status", approval),
+            "record_id": meta.get("record id") or compose_record_id(kind, Path(relative_path).stem),
+        }
+        aliases = {
+            "repo": ("repository", "repo"),
+            "branch": ("git branch", "branch"),
+            "head": ("git head", "head"),
+            "scope": ("scope",),
+            "corrects": ("corrects",),
+            "supersedes": ("supersedes",),
+            "superseded_by": ("superseded by",),
+        }
+        for field, keys in aliases.items():
+            observed = next((meta[key] for key in keys if meta.get(key)), None)
+            if observed:
+                doc[field] = observed
+        docs.append(doc)
     return docs
 
 
@@ -2065,50 +2195,92 @@ def tokenize_texts(texts: list[str]):
 
 def query_variants(query: str) -> list[tuple[str, str, float]]:
     cleaned = query.strip()
+    if not cleaned:
+        return []
     expanded = split_identifier_text(cleaned)
     lower = cleaned.lower()
     variants: list[tuple[str, str, float]] = [("original", cleaned, 1.0)]
     if expanded and expanded.lower() != cleaned.lower():
-        variants.append(("identifier/path expansion", expanded, 0.9))
-
+        variants.append(("identifier/path expansion", expanded, 0.35))
     intent_expansions = []
-    if re.search(r"\b(why|reason|rationale|decision|decide|choice|tradeoff)\b|왜|이유|결정", lower):
-        intent_expansions.append("why rationale context decision consequence tradeoff")
-    if re.search(r"\b(idea|hypothesis|proposal|future|ablation)\b|아이디어|가설|제안", lower):
-        intent_expansions.append("idea problem opportunity hypothesis expected value next check ablation")
-    if re.search(r"\b(experiment|eval|evaluation|metric|result|analysis|figure)\b|실험|평가|분석|결과", lower):
-        intent_expansions.append("experiment goal setup metrics results artifacts interpretation")
-    if re.search(r"\b(code|file|change|implement|implementation|config|script)\b|코드|구현|파일|수정", lower):
-        intent_expansions.append("change code file why how validation git status")
-    if re.search(r"\b(handoff|collaboration|agent|owner|ownership)\b|협업|인수인계|에이전트", lower):
-        intent_expansions.append("handoff summary ownership files next actions risks")
-
+    for pattern, expansion in [
+        (r"\b(why|reason|rationale|decision|decide|choice|tradeoff)\b|왜|이유|결정", "rationale decision consequence tradeoff"),
+        (r"\b(idea|hypothesis|proposal|future|ablation)\b|아이디어|가설|제안", "hypothesis expected next ablation"),
+        (r"\b(experiment|eval|evaluation|metric|result|analysis|figure)\b|실험|평가|분석|결과", "experiment metrics results artifacts"),
+        (r"\b(code|file|change|implement|implementation|config|script)\b|코드|구현|파일|수정", "change implementation validation"),
+        (r"\b(handoff|collaboration|agent|owner|ownership)\b|협업|인수인계|에이전트", "handoff ownership next risks"),
+    ]:
+        if re.search(pattern, lower):
+            intent_expansions.append(expansion)
     for idx, expansion in enumerate(intent_expansions, 1):
-        variants.append((f"intent expansion {idx}", f"{expanded or cleaned} {expansion}", 0.7))
+        variants.append((f"intent expansion {idx}", expansion, 0.2))
+    return variants
 
-    seen = set()
-    deduped = []
-    for label, text, weight in variants:
-        key = re.sub(r"\s+", " ", text.lower()).strip()
-        if key and key not in seen:
-            deduped.append((label, text, weight))
-            seen.add(key)
-    return deduped
+
+def query_identifiers(query: str) -> list[str]:
+    """Keep exact code entities intact when proposing looser search variants."""
+    identifiers = []
+    for token in re.findall(r"[A-Za-z0-9][A-Za-z0-9_./:-]*", query):
+        token = token.rstrip(".:/")
+        if ("/" in token or "_" in token or "." in token
+                or re.search(r"[a-z][A-Z]", token)
+                or re.fullmatch(r"[0-9a-fA-F]{7,40}", token)):
+            if token not in identifiers:
+                identifiers.append(token)
+    return identifiers
+
+
+def identifier_match(identifier: str, text: str) -> bool:
+    identifier = identifier.removeprefix("./")
+    if re.fullmatch(r"[0-9a-fA-F]{7,40}", identifier):
+        return bool(re.search(r"(?<![0-9a-fA-F])" + re.escape(identifier) + r"[0-9a-fA-F]*(?![0-9a-fA-F])", text))
+    # A basename can match the end of a path, but symbols and full paths cannot
+    # silently become substrings of another identifier.
+    left = r"(?<![\w.:-])" if "/" not in identifier else r"(?<![\w./:-])"
+    right = r"(?=$|[^\w./:-]|[.:](?!\w)|:\d+\b)"
+    return bool(re.search(left + re.escape(identifier) + right, text))
+
+
+def korean_spacing_tokens(text: str) -> list[str]:
+    """Compact at most three adjacent Hangul words; no inferred synonyms."""
+    tokens = set()
+    for run in re.findall(r"[가-힣]+(?:[ \t]+[가-힣]+)*", text):
+        words = run.split()
+        for start in range(len(words)):
+            for width in range(1, min(3, len(words) - start) + 1):
+                compact = "".join(words[start:start + width])
+                if 3 <= len(compact) <= 24:
+                    tokens.add("ko:" + compact)
+    return sorted(tokens)
+
+
+def excerpt_with_line(text: str, query_tokens: list[str], max_chars: int = 260) -> tuple[str, int]:
+    tokens = [token.lower() for token in query_tokens if token and not token.startswith("ko:")]
+    korean = [token[3:] for token in query_tokens if token.startswith("ko:")]
+    ranked = []
+    for idx, line in enumerate(text.splitlines()):
+        stripped = line.strip()
+        if not stripped or stripped.startswith(("#", "---", "```")):
+            continue
+        if re.match(r"^(?:Date|Status|Agent|Record Id|Tags|Commits):", stripped):
+            continue
+        matches = sum(token in stripped.lower() for token in tokens)
+        compact = re.sub(r"[ \t]+", "", stripped)
+        matches += sum(token in compact for token in korean)
+        ranked.append((matches, -idx, stripped, idx))
+    if not ranked:
+        return (first_nonempty_line(text)[:max_chars] or "-", 0)
+    _, _, line, idx = max(ranked)
+    # Put the matched evidence inside the budget, even on a very long line.
+    lowered = line.lower()
+    starts = [lowered.find(token) for token in tokens if token in lowered]
+    start = max(0, min(starts) - 70) if starts else 0
+    excerpt = line[start:start + max_chars]
+    return (("…" if start else "") + excerpt, idx)
 
 
 def best_excerpt(text: str, query_tokens: list[str], max_chars: int = 260) -> str:
-    lowered_tokens = [token.lower() for token in query_tokens if token]
-    fallback = ""
-    for line in text.splitlines():
-        stripped = line.strip()
-        if not stripped:
-            continue
-        if not fallback and not stripped.startswith("#"):
-            fallback = stripped
-        lowered = stripped.lower()
-        if any(token in lowered for token in lowered_tokens):
-            return stripped[:max_chars]
-    return (fallback or first_nonempty_line(text) or "-")[:max_chars]
+    return excerpt_with_line(text, query_tokens, max_chars)[0]
 
 
 def first_nonempty_line(text: str) -> str:
@@ -2119,86 +2291,161 @@ def first_nonempty_line(text: str) -> str:
     return ""
 
 
-def bm25_search_documents(docs: list[dict[str, str]], query: str, limit: int = 8) -> dict:
-    variants = query_variants(query)
-    payload = {
-        "query": query,
-        "variants": variants,
-        "results": [],
-        "reflection": [],
-    }
-    if not docs:
-        payload["reflection"].append("No history documents are available yet.")
+def bm25_search_documents(
+    docs: list[dict[str, str]], query: str, limit: int = 8, *,
+    use_variants: bool = True, max_chunks_per_file: int = 1,
+    kinds: list[str] | None = None, statuses: list[str] | None = None,
+    scope: str | None = None, strict_identifiers: bool = True,
+    korean_spacing: bool = True,
+) -> dict:
+    if limit < 1 or max_chunks_per_file not in {1, 2}:
+        raise ValueError("limit must be positive and max_chunks_per_file must be 1 or 2")
+    variants = query_variants(query) if use_variants else ([("original", query.strip(), 1.0)] if query.strip() else [])
+    payload = {"query": query, "variants": variants, "results": [], "reflection": [], "diagnostics": []}
+    def diagnostic(code: str, message: str) -> None:
+        payload["diagnostics"].append({"code": code, "message": message})
+    all_docs = docs
+    aliases = {"change": "changes", "decision": "decisions", "idea": "ideas", "experiment": "experiments", "handoff": "handoffs", "handoff-agent-capsule": "capsules", "capsule": "capsules", "session": "sessions"}
+    kinds = [aliases.get(kind, kind) for kind in kinds] if kinds else None
+    docs = [doc for doc in docs
+            if (not kinds or doc["kind"] in kinds)
+            and (not statuses or doc.get("status", doc.get("approval", "unknown")).lower() in {s.lower() for s in statuses})
+            and (not scope or doc["path"] == scope.rstrip("/") or doc["path"].startswith(scope.rstrip("/") + "/"))]
+    if not docs or not variants:
+        diagnostic("empty_scope" if not docs else "empty_query", "No evidence documents or query terms in the selected scope.")
+        payload["reflection"] = [item["message"] for item in payload["diagnostics"]]
         return payload
-    if not variants:
-        payload["reflection"].append("The query was empty after normalization.")
-        return payload
-
     bm25s = load_bm25s()
     corpus_tokens = tokenize_texts([doc["index_text"] for doc in docs])
+    spacing_tokens = [korean_spacing_tokens(doc["index_text"]) for doc in docs] if korean_spacing and use_variants else [[] for _ in docs]
+    for tokens, spacing in zip(corpus_tokens, spacing_tokens):
+        tokens.extend(spacing)
+    original_tokens = tokenize_texts([query])[0]
+    query_spacing_all = korean_spacing_tokens(query) if korean_spacing and use_variants else []
+    # Add only literal normalized query phrases found in a Hangul run. This
+    # also handles an attached particle without inventing semantic aliases.
+    for idx, doc in enumerate(docs):
+        compact_runs = [re.sub(r"[ \t]+", "", run) for run in re.findall(r"[가-힣]+(?:[ \t]+[가-힣]+)*", doc["index_text"])]
+        for token in query_spacing_all:
+            if any(token[3:] in run for run in compact_runs) and token not in spacing_tokens[idx]:
+                spacing_tokens[idx].append(token)
+                corpus_tokens[idx].append(token)
+    body_tokens = tokenize_texts([doc["text"] for doc in docs])
+    identifiers = query_identifiers(query)
+    identity_matches = [[identifier for identifier in identifiers if identifier_match(identifier, doc["index_text"])] for doc in docs]
+    missing_identifiers = [identifier for identifier in identifiers if not any(identifier in matches for matches in identity_matches)]
+    if missing_identifiers:
+        diagnostic("exact_match_missing", "No exact evidence for identifier(s): " + ", ".join(missing_identifiers))
+    for tokens, identifiers_found in zip(corpus_tokens, identity_matches):
+        for identifier in identifiers_found:
+            if identifier.lower() not in tokens:
+                tokens.append(identifier.lower())
     retriever = bm25s.BM25(method="lucene", corpus=docs)
     retriever.index(corpus_tokens, show_progress=False)
-
-    combined = [0.0 for _ in docs]
+    vocab = set(getattr(retriever, "vocab_dict", {}))
+    query_spacing = [token for token in korean_spacing_tokens(query) if token in vocab]
+    if query_spacing and korean_spacing and use_variants:
+        variants.append(("Korean spacing normalization", " ".join(query_spacing), 0.4))
+    combined = [0.0] * len(docs)
     contributing: list[list[str]] = [[] for _ in docs]
-    all_query_tokens: list[str] = []
-    original_query_tokens: list[str] = []
+    generated_tokens = []
     for label, text, weight in variants:
-        tokenized = tokenize_texts([text])
-        tokens = tokenized[0] if tokenized else []
-        if label == "original":
-            original_query_tokens = list(tokens)
-        all_query_tokens.extend(tokens)
+        tokens = tokenize_texts([text])[0]
+        if label != "original":
+            generated_tokens.extend(tokens)
         if not tokens:
             continue
-        scores = retriever.get_scores(tokens)
-        for idx, score in enumerate(scores):
-            weighted = float(score) * weight
-            if weighted > 0:
-                combined[idx] += weighted
+        for idx, score in enumerate(retriever.get_scores(tokens)):
+            if score > 0:
+                combined[idx] += float(score) * weight
                 contributing[idx].append(label)
-
-    ranked = sorted(enumerate(combined), key=lambda item: item[1], reverse=True)
-    vocab = set(getattr(retriever, "vocab_dict", {}).keys())
-    query_counter = Counter(all_query_tokens)
-    original_unknown = sorted([token for token in set(original_query_tokens) if token not in vocab])
-    generated_unknown = sorted(
-        [token for token in query_counter if token not in vocab and token not in original_unknown]
-    )
-    found_tokens = sorted([token for token in query_counter if token in vocab])
-    excerpt_tokens = [token for token in original_query_tokens if token in vocab] or found_tokens or all_query_tokens
-
-    results = []
-    for idx, score in ranked[:limit]:
+    intent_terms = {
+        "why", "how", "what", "when", "where", "which", "does", "did", "is", "are", "the", "a", "an",
+        "of", "to", "in", "on", "for", "and", "or", "was", "were", "reason", "rationale",
+        "이유", "왜", "어떻게", "무엇", "언제",
+    }
+    target_terms = [token for token in original_tokens if token not in intent_terms]
+    candidates = []
+    expansion_only = 0
+    for idx, score in enumerate(combined):
         if score <= 0:
             continue
+        matches = [token for token in target_terms if token in corpus_tokens[idx]]
+        spacing_matches = [token for token in query_spacing if token in spacing_tokens[idx]]
+        if strict_identifiers and identifiers and not identity_matches[idx]:
+            expansion_only += 1
+            continue
+        if not identity_matches[idx] and not matches and not spacing_matches:
+            expansion_only += 1
+            continue
+        candidates.append((idx, score, matches, spacing_matches))
+    def evidence_rank(item):
+        idx, score, matches, spacing_matches = item
+        body = docs[idx]["text"]
+        body_identity = sum(identifier_match(identifier, body) for identifier in identifiers)
+        body_lexical = sum(token in body_tokens[idx] for token in target_terms)
+        body_compact = re.sub(r"[ \t]+", "", body)
+        body_spacing = sum(token[3:] in body_compact for token in spacing_matches)
+        return (-len(identity_matches[idx]), -body_identity, -body_lexical, -body_spacing,
+                -len(matches), -score, docs[idx]["path"], int(docs[idx].get("line_start", "1")))
+    candidates.sort(key=evidence_rank)
+    counts = Counter()
+    results = []
+    for idx, score, matches, spacing_matches in candidates:
         doc = docs[idx]
-        results.append(
-            {
-                "score": score,
-                "path": doc["path"],
-                "title": doc["title"],
-                "heading": doc.get("heading", ""),
-                "line_start": doc.get("line_start", "1"),
-                "chunk_id": doc.get("chunk_id", "1"),
-                "chunk_count": doc.get("chunk_count", "1"),
-                "kind": doc["kind"],
-                "approval": doc.get("approval", "unknown"),
-                "archive_status": doc.get("archive_status", "active"),
-                "variants": sorted(set(contributing[idx])),
-                "excerpt": best_excerpt(doc["text"], excerpt_tokens),
-            }
-        )
-
+        if counts[doc["path"]] >= max_chunks_per_file:
+            continue
+        counts[doc["path"]] += 1
+        terms = [*original_tokens, *spacing_matches]
+        excerpt, offset = excerpt_with_line(doc["text"], terms)
+        result = {
+            "score": score, "path": doc["path"], "title": doc["title"],
+            "heading": doc.get("heading", ""), "line_start": doc.get("line_start", "1"),
+            "excerpt_line": int(doc.get("line_start", "1")) + offset,
+            "chunk_id": doc.get("chunk_id", "1"), "chunk_count": doc.get("chunk_count", "1"),
+            "kind": doc["kind"], "approval": doc.get("approval", "unknown"),
+            "archive_status": doc.get("archive_status", "active"),
+            "variants": sorted(set(contributing[idx])), "excerpt": excerpt,
+            "match_type": "identifier" if identity_matches[idx] else ("original" if matches else "korean_spacing"),
+            "matched_terms": matches, "matched_identifiers": identity_matches[idx],
+            "metadata": {key: doc[key] for key in ("date", "status", "scope", "repo", "branch", "head", "corrects", "supersedes", "superseded_by") if doc.get(key)},
+        }
+        results.append(result)
+        if len(results) >= limit:
+            break
     payload["results"] = results
-    payload["reflection"] = reflect_bm25_results(
-        query, variants, results, original_unknown, generated_unknown
-    )
+    if expansion_only:
+        diagnostic("expansion_only_suppressed", f"Suppressed {expansion_only} chunks without original target evidence.")
+    unknown = sorted(set(original_tokens) - vocab)
+    if unknown:
+        diagnostic("target_terms_missing", "Original tokens absent from scope: " + ", ".join(unknown[:8]))
+    if results and any(r["match_type"] == "korean_spacing" for r in results):
+        diagnostic("korean_spacing_normalized", "Some evidence matched only after literal Hangul spacing normalization.")
+    if not results:
+        diagnostic("no_evidence", "No supported hit; absence of a hit does not prove the fact or record is absent.")
+    elif len(results) < limit:
+        diagnostic("partial_results", f"Found {len(results)} distinct evidence hits in the selected scope.")
+    if len(results) == limit and len(candidates) > len(results):
+        diagnostic("truncated", "Result budget reached; refine the query or scope for additional evidence.")
+    payload["reflection"] = reflect_bm25_results(query, variants, results, unknown, sorted(set(generated_tokens) - vocab))
+    payload["reflection"].extend(item["message"] for item in payload["diagnostics"])
+    from history_relations import attach_relations
+    return attach_relations(payload, all_docs, {doc["path"] for doc in docs})
+
+
+def bm25_search(
+    root: Path, query: str, limit: int = 8, include_archive: bool = False, **options,
+) -> dict:
+    payload = bm25_search_documents(bm25_documents(root, include_archive), query, limit, **options)
+    if re.fullmatch(r"[0-9a-fA-F]{7,40}", query.strip()) and git_available(root):
+        commit = resolve_commit(root, query.strip())
+        if commit:
+            ancestor = subprocess.run(["git", "-C", str(root), "merge-base", "--is-ancestor", commit, "HEAD"], capture_output=True).returncode == 0
+            payload["git_commit"] = {"sha": commit, "ancestor_of_head": ancestor, "next_command": f"commits --commit {commit}"}
+            message = f"The identifier resolves to Git commit {commit}; inspect `commits --commit {commit}` for exact record links. Ancestry does not imply current effect."
+            payload["diagnostics"].append({"code": "git_commit_resolved", "message": message})
+            payload["reflection"].append(message)
     return payload
-
-
-def bm25_search(root: Path, query: str, limit: int = 8, include_archive: bool = False) -> dict:
-    return bm25_search_documents(bm25_documents(root, include_archive), query, limit)
 
 
 def reflect_bm25_results(
@@ -2262,13 +2509,20 @@ def print_bm25_payload(payload: dict, show_variants: bool = True) -> None:
         archive_state = result.get("archive_status", "active")
         print(
             f"   score={result['score']:.4f}; kind={result['kind']}; "
-            f"approval={approval}; archive_status={archive_state}; matched={variants}"
+            f"approval={approval}; archive_status={archive_state}; matched={variants}; "
+            f"match_type={result.get('match_type', 'unknown')}"
         )
         print(
             f"   location=chunk {result.get('chunk_id', '1')}/{result.get('chunk_count', '1')}; "
-            f"line={result.get('line_start', '1')}; heading={result.get('heading') or '-'}"
+            f"line={result.get('excerpt_line', result.get('line_start', '1'))}; heading={result.get('heading') or '-'}"
         )
         print(f"   excerpt: {result['excerpt']}")
+        metadata = result.get("metadata", {})
+        if metadata:
+            print("   recorded: " + "; ".join(f"{key}={value}" for key, value in metadata.items()))
+        for related in result.get("related_records", []):
+            outside = "; outside query filters" if related.get("outside_filters") else ""
+            print(f"   [{related['relation']}] {related['path']}:{related['line']} (status={related['status']}{outside}) via {related['via']}: {related['excerpt']}")
     print("")
 
     print("## Reflection")
@@ -2306,6 +2560,28 @@ def cmd_obsidian_map(args: argparse.Namespace) -> None:
     print(rel(root, build_obsidian_map(root)))
 
 
+def annotate_record(text: str, args: argparse.Namespace, root: Path) -> str:
+    scope = getattr(args, "scope", None)
+    if scope:
+        text = set_metadata_line(text, "Scope", scope)
+    for key in ("corrects", "supersedes"):
+        refs = getattr(args, key, None) or []
+        if refs:
+            targets = [record_id_for(find_record(root, ref)) for ref in refs]
+            text = set_metadata_line(text, key.title(), ", ".join(dict.fromkeys(targets)))
+    return text
+
+
+def search_options(args: argparse.Namespace) -> dict:
+    return {
+        "use_variants": not getattr(args, "no_variants", False),
+        "max_chunks_per_file": getattr(args, "chunks_per_file", 1),
+        "kinds": getattr(args, "kind", None),
+        "statuses": getattr(args, "status_filter", None),
+        "scope": getattr(args, "scope", None),
+    }
+
+
 def cmd_change(args: argparse.Namespace) -> None:
     root = detect_root(args.root)
     title = args.title
@@ -2326,6 +2602,7 @@ def cmd_change(args: argparse.Namespace) -> None:
     )
     if not args.no_git_status:
         text += "\n## Git Status Snapshot\n\n```text\n" + git_status(root) + "\n```\n"
+    text = annotate_record(text, args, root)
     write_record(root, "changes", filename, text, "change", title, args.commit)
 
 
@@ -2347,6 +2624,7 @@ def cmd_decision(args: argparse.Namespace) -> None:
         .replace("{{rationale}}", value(args.rationale))
         .replace("{{consequences}}", value(args.consequence))
     )
+    text = annotate_record(text, args, root)
     write_record(root, "decisions", filename, text, "decision", title, args.commit)
 
 
@@ -2370,6 +2648,7 @@ def cmd_idea(args: argparse.Namespace) -> None:
         .replace("{{links}}", bullets(args.link))
         .replace("{{next}}", value(args.next))
     )
+    text = annotate_record(text, args, root)
     write_record(root, "ideas", filename, text, "idea", title, args.commit)
 
 
@@ -2394,6 +2673,7 @@ def cmd_experiment(args: argparse.Namespace) -> None:
         .replace("{{artifacts}}", bullets(args.artifact))
         .replace("{{next}}", value(args.next))
     )
+    text = annotate_record(text, args, root)
     write_record(root, "experiments", filename, text, "experiment", title, args.commit)
 
 
@@ -2423,20 +2703,22 @@ def cmd_handoff(args: argparse.Namespace) -> None:
         text = set_metadata_line(text, "Promoted To", "-")
         text = set_metadata_line(text, "Archived", "no")
         text = set_metadata_line(text, "Archived Date", "-")
+    text = annotate_record(text, args, root)
     write_record(root, "handoffs", filename, text, "handoff", title, args.commit)
 
 
 def format_bm25_read_first(payload: dict) -> str:
-    if not payload["results"]:
-        return "-"
     lines = []
-    for rank, result in enumerate(payload["results"], 1):
-        lines.append(
-            f"{rank}. `{result['path']}` - {result['title']} "
-            f"(kind={result['kind']}, score={result['score']:.4f})"
-        )
-        lines.append(f"   - {result['excerpt']}")
-    return "\n".join(lines)
+    seen = set()
+    for result in payload["results"]:
+        if result["path"] not in seen:
+            lines.append(f"- `{result['path']}`:{result.get('excerpt_line', result.get('line_start', 1))} - {result['title']} [{result.get('approval', 'unknown')}]")
+            seen.add(result["path"])
+        for related in result.get("related_records", []):
+            if related["path"] not in seen:
+                lines.append(f"  - [{related['relation']}] `{related['path']}`:{related['line']} - {related['excerpt']}")
+                seen.add(related["path"])
+    return "\n".join(lines) or "- No supported history hits; verify current files or refine the query."
 
 
 def format_generated_queries(payload: dict) -> str:
@@ -2458,7 +2740,7 @@ def latest_capsule(root: Path) -> Path | None:
     folder = root / HISTORY_DIR / "capsules"
     if not folder.exists():
         return None
-    files = sorted(folder.glob("*.md"), key=lambda p: p.stat().st_mtime, reverse=True)
+    files = sorted(folder.glob("*.md"), key=record_sort_key, reverse=True)
     return files[0] if files else None
 
 
@@ -2504,24 +2786,25 @@ def cmd_handoff_agent_capsule_create(args: argparse.Namespace) -> None:
         text = set_metadata_line(text, "Promoted To", "-")
         text = set_metadata_line(text, "Archived", "no")
         text = set_metadata_line(text, "Archived Date", "-")
+    text = annotate_record(text, args, root)
     write_record(root, "capsules", filename, text, "handoff-agent-capsule", task)
 
 
 def cmd_handoff_agent_capsule_resume(args: argparse.Namespace) -> None:
     root = detect_root(args.root)
-    ensure_history(root)
     capsule: Path | None = None
     if args.path:
         capsule = (root / args.path).resolve() if not Path(args.path).is_absolute() else Path(args.path).resolve()
     elif args.query:
-        payload = bm25_search(root, args.query, max(args.limit, 5))
+        payload = bm25_search(root, args.query, max(args.limit, 5), use_variants=not args.no_variants)
         for result in payload["results"]:
             candidate = root / result["path"]
             if record_kind(candidate) == "capsules":
                 capsule = candidate
                 break
         if capsule is None:
-            capsule = latest_capsule(root)
+            print("No matching handoff agent capsule found; refine the query or select --path explicitly.")
+            return
     else:
         capsule = latest_capsule(root)
 
@@ -2532,6 +2815,7 @@ def cmd_handoff_agent_capsule_resume(args: argparse.Namespace) -> None:
     print(f"# Resume From Handoff Agent Capsule")
     print("")
     print(f"Capsule: `{rel(root, capsule)}`")
+    print("Historical snapshot; use --query to refresh evidence and correction links.")
     print("")
     text = capsule.read_text(encoding="utf-8")
     print(text.rstrip() if args.full else clip(text, args.chars).rstrip())
@@ -2540,7 +2824,7 @@ def cmd_handoff_agent_capsule_resume(args: argparse.Namespace) -> None:
         print("")
         print("## Additional BM25 Recall")
         print("")
-        payload = bm25_search(root, args.query, args.limit)
+        payload = bm25_search(root, args.query, args.limit, use_variants=not args.no_variants)
         print_bm25_payload(payload, show_variants=not args.no_variants)
 
 
@@ -2583,6 +2867,7 @@ def cmd_session(args: argparse.Namespace) -> None:
         .replace("{{agent}}", agent)
         .replace("{{scope}}", value(args.scope))
     )
+    text = annotate_record(text, args, root)
     write_record(root, "sessions", filename, text, "session", task)
 
 
@@ -2600,7 +2885,7 @@ def iter_history_files(root: Path) -> list[Path]:
 
 
 def iter_search_files(root: Path) -> list[Path]:
-    def rank(path: Path) -> tuple[int, float]:
+    def rank(path: Path) -> tuple[int, float, str]:
         parent = path.parent.name
         parts = path.parts
         if path.name == "CONTEXT.md" or "canonical" in parts:
@@ -2619,7 +2904,8 @@ def iter_search_files(root: Path) -> list[Path]:
             bucket = 6
         else:
             bucket = 7
-        return (bucket, -path.stat().st_mtime)
+        stamp, identity = record_sort_key(path)
+        return (bucket, -stamp, identity)
 
     return sorted(iter_history_files(root), key=rank)
 
@@ -2688,7 +2974,7 @@ def format_lint_section(title: str, items: list[str]) -> list[str]:
     return lines
 
 
-def lint_history(root: Path, max_chars: int, ensure: bool = True) -> tuple[list[str], list[str]]:
+def lint_history(root: Path, max_chars: int, ensure: bool = False) -> tuple[list[str], list[str]]:
     if ensure:
         ensure_history(root)
     elif not (root / HISTORY_DIR).exists():
@@ -2698,6 +2984,40 @@ def lint_history(root: Path, max_chars: int, ensure: bool = True) -> tuple[list[
     warnings: list[str] = []
     path_index, stem_index = note_indexes(root)
     wikilink_pattern = re.compile(r"\[\[([^\]]+)\]\]")
+    ids: dict[str, list[Path]] = {}
+    numbers: dict[tuple[str, str], list[Path]] = {}
+    records = list(iter_history_files(root))
+    by_id = {record_id_for(path): path for path in records}
+    for path in records:
+        if path.parent.name in RECORD_DIRS and path.parent.name not in {"daily", "templates"}:
+            ids.setdefault(record_id_for(path), []).append(path)
+            match = re.match(r"^(\d{4})-", path.name)
+            if match and path.parent.name in {"decisions", "ideas", "experiments"}:
+                numbers.setdefault((path.parent.name, match.group(1)), []).append(path)
+    for rid, paths in ids.items():
+        if len(paths) > 1:
+            errors.append(f"duplicate record id {rid}: " + ", ".join(rel(root, path) for path in paths))
+    for (kind, number), paths in numbers.items():
+        if len(paths) > 1:
+            warnings.append(f"ambiguous display number {kind}/{number}: use a full record id or path")
+
+    replacement_edges = {}
+    for rid, path in by_id.items():
+        replacement_edges[rid] = [item.strip() for item in record_metadata(path).get("supersedes", "").split(",") if item.strip() in by_id]
+    active, visited = set(), set()
+    def visit_replacement(rid: str) -> None:
+        if rid in active:
+            errors.append(f"cyclic supersedes relation involving {rid}")
+            return
+        if rid in visited:
+            return
+        active.add(rid)
+        for target in replacement_edges.get(rid, []):
+            visit_replacement(target)
+        active.remove(rid)
+        visited.add(rid)
+    for rid in replacement_edges:
+        visit_replacement(rid)
 
     for path in sorted(iter_history_files(root), key=lambda p: rel(root, p)):
         relative = rel(root, path)
@@ -2710,9 +3030,23 @@ def lint_history(root: Path, max_chars: int, ensure: bool = True) -> tuple[list[
         if lint_requires_frontmatter(root, path) and not has_frontmatter(text):
             warnings.append(f"{relative}: missing YAML frontmatter for Obsidian navigation.")
 
-        if len(text) > max_chars:
+        if len(text) > max_chars and path.name not in {"INDEX.md", OBSIDIAN_MAP_FILE}:
             warnings.append(f"{relative}: oversized note ({len(text)} chars > {max_chars}); split or archive if it becomes hard to scan.")
 
+        front = parse_frontmatter(text)
+        body = parse_metadata(strip_frontmatter(text))
+        for key in ("type", "status", "date", "record id", "approval status", "scope"):
+            if key in front and key in body and normalized_status(front[key]) != normalized_status(body[key]):
+                errors.append(f"{relative}: YAML/body metadata disagree for {key}")
+        if re.search(r"(?m)^\{\{(?:title|date|id|status|why|how|results|validation)\}\}\s*$", text):
+            warnings.append(f"{relative}: unfilled record template field")
+        for key in ("corrects", "supersedes", "superseded by"):
+            for target in [item.strip() for item in record_metadata(path).get(key, "").split(",") if item.strip() not in {"", "-"}]:
+                direct = root / target
+                if target == record_id_for(path) or direct.resolve() == path.resolve():
+                    errors.append(f"{relative}: self-referential {key}")
+                elif target not in by_id and not (direct.is_file() and is_relative_to(direct.resolve(), (root / HISTORY_DIR).resolve())):
+                    errors.append(f"{relative}: missing {key} target {target}")
         for match in wikilink_pattern.finditer(text):
             raw_target = match.group(1).strip()
             target = wikilink_target(raw_target)
@@ -2766,22 +3100,28 @@ def search_lines(root: Path, query: str, limit: int, include_archive: bool = Fal
 
 def cmd_search(args: argparse.Namespace) -> None:
     root = detect_root(args.root)
-    ensure_history(root)
     if args.exact:
+        if getattr(args, "kind", None) or getattr(args, "status_filter", None) or getattr(args, "scope", None):
+            raise SystemExit("search --exact does not support --kind, --status, or --scope; omit --exact for filtered evidence search.")
         results = search_lines(root, args.query, args.limit, args.include_archive)
+        if getattr(args, "json", False):
+            print(json.dumps({"query": args.query, "mode": "exact", "results": results}, ensure_ascii=False, indent=2))
+            return
         if not results:
             print("No matches.")
             return
         print("\n".join(results))
         return
 
-    payload = bm25_search(root, args.query, args.limit, args.include_archive)
-    print_bm25_payload(payload, show_variants=not args.no_variants)
+    payload = bm25_search(root, args.query, args.limit, args.include_archive, **search_options(args))
+    if getattr(args, "json", False):
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        print_bm25_payload(payload, show_variants=not args.no_variants)
 
 
 def cmd_exact(args: argparse.Namespace) -> None:
     root = detect_root(args.root)
-    ensure_history(root)
     results = search_lines(root, args.query, args.limit, args.include_archive)
     if not results:
         print("No matches.")
@@ -2791,7 +3131,6 @@ def cmd_exact(args: argparse.Namespace) -> None:
 
 def cmd_recent(args: argparse.Namespace) -> None:
     root = detect_root(args.root)
-    ensure_history(root)
     paths = [path for path in iter_history_files(root) if path.name != OBSIDIAN_MAP_FILE]
     for path in paths[: args.limit]:
         print(f"{rel(root, path)} - {first_heading(path)}")
@@ -2801,7 +3140,7 @@ def latest_history_file(root: Path, folder: str) -> Path | None:
     base = root / HISTORY_DIR / folder
     if not base.exists():
         return None
-    files = sorted(base.glob("*.md"), key=lambda p: p.stat().st_mtime, reverse=True)
+    files = sorted(base.glob("*.md"), key=record_sort_key, reverse=True)
     return files[0] if files else None
 
 
@@ -2811,7 +3150,7 @@ def latest_handoff_paths(root: Path, limit: int) -> list[Path]:
         base = root / HISTORY_DIR / folder
         if base.exists():
             paths.extend(base.glob("*.md"))
-    return sorted(paths, key=lambda p: p.stat().st_mtime, reverse=True)[:limit]
+    return sorted(paths, key=record_sort_key, reverse=True)[:limit]
 
 
 def record_brief(path: Path) -> str:
@@ -2856,6 +3195,15 @@ def is_history_record_path(path_text: str) -> bool:
 def cmd_start(args: argparse.Namespace) -> None:
     root = detect_root(args.root)
     history = root / HISTORY_DIR
+    if getattr(args, "brief", False):
+        args.context_chars = min(args.context_chars, 1000)
+        args.daily_chars = min(args.daily_chars, 300)
+        args.limit = min(args.limit, 3)
+    if getattr(args, "json", False):
+        payload = bm25_search(root, args.query or "", args.limit, args.include_archive, **search_options(args))
+        payload["repository"] = {"root": str(root), "branch": git_output(root, ["branch", "--show-current"]), "head": resolve_commit(root, "HEAD")}
+        print(json.dumps(payload, ensure_ascii=False))
+        return
     print(f"# Session Start ({root})")
     print("")
     if not history.exists():
@@ -2904,11 +3252,12 @@ def cmd_start(args: argparse.Namespace) -> None:
             for path in iter_history_files(root)
             if path.name not in {"CONTEXT.md", "INDEX.md", "README.md", OBSIDIAN_MAP_FILE}
         )
-        if record_count >= ARCHIVE_ADOPT_HINT_RECORDS:
+        eligible = long_term_archive_candidates(root, list(DEFAULT_ARCHIVE_KINDS), DEFAULT_ARCHIVE_AGE_DAYS, 0) if record_count >= ARCHIVE_ADOPT_HINT_RECORDS else []
+        if eligible:
             print("## Archive")
             print("")
             print(
-                f"- {record_count} records and no archive yet. Older records still cost full text on every recall."
+                f"- {len(eligible)} older records are eligible for first-time archiving."
             )
             print("- Run `archive adopt --dry-run` once to see the one-time bulk archive for this history.")
             print("")
@@ -2937,8 +3286,26 @@ def cmd_start(args: argparse.Namespace) -> None:
     if args.query:
         print(f"## BM25 Recall: {args.query}")
         print("")
-        payload = bm25_search(root, args.query, args.limit, args.include_archive)
+        payload = bm25_search(root, args.query, args.limit, args.include_archive, **search_options(args))
         print_bm25_payload(payload, show_variants=not args.no_variants)
+
+
+def unrecorded_commits_since(root: Path, base: str) -> list[str]:
+    resolved = resolve_commit(root, base)
+    if not resolved:
+        raise SystemExit(f"Unknown base commit: {base}")
+    if subprocess.run(["git", "-C", str(root), "merge-base", "--is-ancestor", resolved, "HEAD"], capture_output=True).returncode:
+        raise SystemExit("--base must be an ancestor of HEAD")
+    shas = (git_output(root, ["rev-list", "--reverse", f"{resolved}..HEAD"]) or "").splitlines()
+    listed = {normalize_sha(ref) for path in paired_record_paths(root) for ref in record_commits(path)}
+    missing = []
+    for sha in shas:
+        paths = commit_files(root, sha)
+        work = any(not path.startswith((HISTORY_DIR + "/", ARCHIVE_DIR + "/")) for path in paths)
+        documented = any(is_history_record_path(path) for path in paths)
+        if work and not documented and not commit_record_ids(root, sha) and normalize_sha(sha) not in listed:
+            missing.append(sha)
+    return missing
 
 
 def cmd_finish(args: argparse.Namespace) -> None:
@@ -3039,25 +3406,47 @@ def cmd_finish(args: argparse.Namespace) -> None:
     if legacy_archive_root(root).exists():
         print(f"- legacy `{rel(root, legacy_archive_root(root))}` folder found; run `archive migrate`.")
 
-    if errors or (args.strict and warnings):
+    untracked_history = (git_output(root, ["ls-files", "--others", "--exclude-standard", "-z", "--", HISTORY_DIR + "/", ARCHIVE_DIR + "/"]) or "").split("\0") if git_available(root) else []
+    untracked_history = [path for path in untracked_history if path]
+    if untracked_history:
+        print("\n## Untracked Durable History\n")
+        print(f"- {len(untracked_history)} history file(s) are not in Git yet; select the intended files explicitly before claiming durable persistence.")
+        for path in untracked_history[:8]:
+            print(f"- {path}")
+    missing_scoped = []
+    if getattr(args, "base", None):
+        missing_scoped = unrecorded_commits_since(root, args.base)
+        print("\n## Work Since Base\n")
+        for sha in missing_scoped:
+            print(f"- no linked or co-changed record: {sha} {commit_subject(root, sha)}")
+        if not missing_scoped:
+            print("- no unrecorded code commits in the selected range")
+    if errors or (args.strict and (warnings or missing_scoped or untracked_history)):
         raise SystemExit(1)
 
 
 def cmd_recall(args: argparse.Namespace) -> None:
     root = detect_root(args.root)
-    ensure_history(root)
-    today_file(root)
-    build_index(root)
+    if getattr(args, "update", False):
+        ensure_history(root)
+        today_file(root)
+        build_index(root)
+
+    if getattr(args, "json", False):
+        payload = bm25_search(root, args.query or "", args.limit, args.include_archive, **search_options(args))
+        payload["repository"] = {"root": str(root), "branch": git_output(root, ["branch", "--show-current"]), "head": resolve_commit(root, "HEAD")}
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return
 
     print(f"# Recall ({root})")
     print("")
     context = root / HISTORY_DIR / "CONTEXT.md"
     print(f"## {rel(root, context)}")
     print("")
-    print(clip(context.read_text(encoding="utf-8"), args.context_chars).rstrip())
+    print(clip(context.read_text(encoding="utf-8"), args.context_chars).rstrip() if context.exists() else "- missing; run bootstrap before recording")
     print("")
 
-    latest_daily = sorted((root / HISTORY_DIR / "daily").glob("*.md"), reverse=True)
+    latest_daily = sorted((root / HISTORY_DIR / "daily").glob("*.md"), key=record_sort_key, reverse=True)
     if latest_daily:
         print(f"## Latest Daily: {rel(root, latest_daily[0])}")
         print("")
@@ -3081,7 +3470,7 @@ def cmd_recall(args: argparse.Namespace) -> None:
     if args.query:
         print(f"## BM25 Recall: {args.query}")
         print("")
-        payload = bm25_search(root, args.query, args.limit, args.include_archive)
+        payload = bm25_search(root, args.query, args.limit, args.include_archive, **search_options(args))
         print_bm25_payload(payload, show_variants=not args.no_variants)
 
 
@@ -3172,7 +3561,7 @@ def cmd_collab_submit_summary(args: argparse.Namespace) -> None:
         },
     )
     inbox = root / HISTORY_DIR / "inbox" / filename
-    inbox.write_text(text, encoding="utf-8")
+    atomic_write_text(inbox, text)
     append_daily(root, "collab-summary", title, inbox)
     build_index(root)
     print(rel(root, inbox))
@@ -3244,7 +3633,7 @@ def append_promoted_update(
         ]
     )
     target_path.parent.mkdir(parents=True, exist_ok=True)
-    target_path.write_text(raw.rstrip() + "\n" + update, encoding="utf-8")
+    atomic_write_text(target_path, raw.rstrip() + "\n" + update)
 
 
 def mark_inbox_promoted(root: Path, source_path: Path, target_path: Path, maintainer: str) -> None:
@@ -3255,7 +3644,7 @@ def mark_inbox_promoted(root: Path, source_path: Path, target_path: Path, mainta
     raw = set_metadata_line(raw, "Promoted By", maintainer)
     raw = set_metadata_line(raw, "Archived", "no")
     raw = set_metadata_line(raw, "Archived Date", "-")
-    source_path.write_text(raw, encoding="utf-8")
+    atomic_write_text(source_path, raw)
 
 
 def cmd_collab_promote(args: argparse.Namespace) -> None:
@@ -3338,7 +3727,7 @@ def cmd_collab_promote(args: argparse.Namespace) -> None:
                 "archived": False,
             },
         )
-        target.write_text(decision_text, encoding="utf-8")
+        atomic_write_text(target, decision_text)
         append_daily(root, "decision", title, target)
     else:
         raise SystemExit(f"Unsupported promote target: {args.target}")
@@ -3422,39 +3811,34 @@ def archive_stub_paths(root: Path) -> list[Path]:
 
 
 def summary_lines_for(path: Path, max_chars: int = ARCHIVE_SUMMARY_CHARS) -> list[str]:
-    """Condense a record into a handful of bullets that stay useful for recall."""
+    """Keep evidence and limitations visible within a measured character budget."""
     text = read_record_text(path)
-    if not text:
-        return ["- (record could not be read)"]
+    if not text or max_chars <= 0:
+        return []
     headings = SUMMARY_SECTIONS.get(record_kind(path), DEFAULT_SUMMARY_SECTIONS)
-    lines: list[str] = []
-    used = 0
+    sections = []
     for heading in headings:
-        if used >= max_chars:
-            break
         section = extract_section(text, heading)
-        if not section or section.strip() == "-":
-            continue
-        parts = [
-            item.strip().lstrip("-").strip()
-            for item in section.splitlines()
-            if item.strip() and item.strip() != "-" and not item.strip().startswith("```")
-        ]
-        condensed = re.sub(r"\s+", " ", " ".join(parts)).strip()
-        if not condensed:
-            continue
-        snippet = condensed[:ARCHIVE_SECTION_CHARS].rstrip()
-        if len(condensed) > ARCHIVE_SECTION_CHARS:
-            snippet += "..."
-        line = f"- **{heading}**: {snippet}"
-        lines.append(line)
-        used += len(line)
-    if not lines:
+        if section and section.strip() != "-":
+            condensed = re.sub(r"\s+", " ", section).strip().lstrip("-").strip()
+            sections.append((heading, condensed))
+    if not sections:
         body = re.sub(r"^#.*$", "", strip_frontmatter(text), flags=re.MULTILINE)
-        condensed = re.sub(r"\s+", " ", body).strip()
-        if condensed:
-            lines.append(f"- {condensed[:max_chars]}")
-    return lines or ["- (no summary content found)"]
+        return ["- " + re.sub(r"\s+", " ", body).strip()[:max(0, max_chars - 2)]]
+    # Files are navigational metadata; reserve the small summary for outcome and caveats.
+    sections.sort(key=lambda pair: (pair[0] == "Files", pair[0] not in {"Results", "Risks / Follow-Ups", "Open Risks", "Risks", "Interpretation / Next", "Next Actions"}))
+    lines = []
+    remaining = max_chars
+    for i, (heading, body) in enumerate(sections):
+        prefix = f"- **{heading}**: "
+        allocation = min(ARCHIVE_SECTION_CHARS, remaining // (len(sections) - i) - len(prefix) - 1)
+        if allocation < 8:
+            continue
+        snippet = body if len(body) <= allocation else body[:allocation - 3].rstrip() + "..."
+        line = prefix + snippet
+        lines.append(line)
+        remaining -= len(line) + 1
+    return lines
 
 
 def archive_stub_text(root: Path, source: Path, destination: Path, summary: list[str]) -> str:
@@ -3482,7 +3866,7 @@ def archive_stub_text(root: Path, source: Path, destination: Path, summary: list
         fields["status"] = meta["status"]
     if commits:
         fields["commits"] = commits
-    for key in ["task", "workstream", "agent", "person", "approval status", "promoted to"]:
+    for key in ["task", "workstream", "agent", "person", "approval status", "promoted to", "scope", "corrects", "supersedes", "superseded by", "repository", "git branch", "git head"]:
         if meta.get(key) and meta[key] != "-":
             fields[key] = meta[key]
 
@@ -3644,8 +4028,6 @@ def build_archive_index(root: Path) -> Path | None:
     lines = [
         "# History Archive Index",
         "",
-        f"Generated: {display_time()}",
-        "",
         f"Archived records: {len(files)}",
         "",
         "Full record texts live here; `history/` keeps a summary stub for each one.",
@@ -3673,7 +4055,7 @@ def build_archive_index(root: Path) -> Path | None:
         lines.append("| - | - | - | none | - | - |")
     out = archive_index_path(root)
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+    atomic_write_text(out, "\n".join(lines).rstrip() + "\n")
     return out
 
 
@@ -3688,7 +4070,7 @@ def archive_candidate_paths(
     if "inbox" in include_types:
         inbox = history / "inbox"
         if inbox.exists():
-            for path in sorted(inbox.glob("*.md"), key=lambda p: p.stat().st_mtime):
+            for path in sorted(inbox.glob("*.md"), key=record_sort_key):
                 if path.name == "README.md" or not path.is_file():
                     continue
                 if approval_status(path) != "accepted":
@@ -3706,7 +4088,7 @@ def archive_candidate_paths(
         base = history / archive_type
         if not base.exists():
             continue
-        for path in sorted(base.glob("*.md"), key=lambda p: p.stat().st_mtime):
+        for path in sorted(base.glob("*.md"), key=record_sort_key):
             if not path.is_file():
                 continue
             if archive_status(path) == "archived":
@@ -3759,7 +4141,7 @@ def cmd_collab_archive(args: argparse.Namespace) -> None:
     for archive_type, source in candidates:
         destination = unique_destination(archive_destination(root, archive_type, source))
         destination.parent.mkdir(parents=True, exist_ok=True)
-        source.write_text(archived_copy_text(root, source), encoding="utf-8")
+        atomic_write_text(source, archived_copy_text(root, source))
         source.replace(destination)
         moved.append(destination)
         print(f"- `{rel(root, source)}` -> `{rel(root, destination)}`")
@@ -3801,14 +4183,14 @@ def collab_paths(
                 paths.append(workstream_path)
     decisions = history / "decisions"
     if decisions.exists():
-        for path in sorted(decisions.glob("*.md"), key=lambda p: p.stat().st_mtime, reverse=True):
+        for path in sorted(decisions.glob("*.md"), key=record_sort_key, reverse=True):
             if approval_status(path) == "accepted" and collab_relevant(path, task, workstream):
                 paths.append(path)
     for folder in ["handoffs", "capsules"]:
         base = history / folder
         if not base.exists():
             continue
-        for path in sorted(base.glob("*.md"), key=lambda p: p.stat().st_mtime, reverse=True):
+        for path in sorted(base.glob("*.md"), key=record_sort_key, reverse=True):
             meta = parse_metadata(path.read_text(encoding="utf-8"))
             if not meta.get("task") and not meta.get("workstream"):
                 continue
@@ -3817,7 +4199,7 @@ def collab_paths(
     if include_inbox:
         inbox = history / "inbox"
         if inbox.exists():
-            for path in sorted(inbox.glob("*.md"), key=lambda p: p.stat().st_mtime, reverse=True):
+            for path in sorted(inbox.glob("*.md"), key=record_sort_key, reverse=True):
                 if path.name == "README.md":
                     continue
                 if collab_relevant(path, task, workstream):
@@ -3909,8 +4291,6 @@ def print_decision_snapshot(root: Path, paths: list[Path], limit: int) -> None:
 
 def cmd_collab_recall(args: argparse.Namespace) -> None:
     root = detect_root(args.root)
-    ensure_collab(root)
-    build_index(root)
     task = normalize_collab_id(args.task, "task") if args.task else None
     workstream = normalize_collab_id(args.workstream, "workstream") if args.workstream else None
     query = args.query or " ".join(item for item in [task, workstream, "benchmark collaboration"] if item)
@@ -3936,6 +4316,7 @@ def cmd_collab_recall(args: argparse.Namespace) -> None:
         collab_documents(root, task, workstream, args.include_inbox, args.include_archive),
         query,
         args.limit,
+        use_variants=not args.no_variants,
     )
     print_bm25_payload(payload, show_variants=not args.no_variants)
     if args.include_inbox:
@@ -3945,7 +4326,14 @@ def cmd_collab_recall(args: argparse.Namespace) -> None:
 
 
 def path_is_stale(path: Path, stale_after: datetime) -> bool:
-    return datetime.fromtimestamp(path.stat().st_mtime).astimezone() < stale_after
+    updated = record_metadata(path).get("last updated", "")
+    for fmt in ("%Y-%m-%d %H:%M %z", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+        try:
+            stamp = datetime.strptime(updated, fmt).astimezone()
+            return stamp < stale_after
+        except ValueError:
+            pass
+    return record_datetime(path) < stale_after
 
 
 def stale_text(path: Path, stale_after: datetime) -> str:
@@ -4016,12 +4404,11 @@ def unscoped_collab_records(root: Path) -> list[Path]:
             meta = parse_metadata(path.read_text(encoding="utf-8"))
             if not meta.get("task") and not meta.get("workstream"):
                 records.append(path)
-    return sorted(records, key=lambda p: p.stat().st_mtime, reverse=True)
+    return sorted(records, key=record_sort_key, reverse=True)
 
 
 def cmd_collab_status(args: argparse.Namespace) -> None:
     root = detect_root(args.root)
-    ensure_collab(root)
     history = root / HISTORY_DIR
     stale_after = now() - timedelta(days=args.stale_days)
     print("# Collaboration Status")
@@ -4204,60 +4591,106 @@ def require_git(root: Path) -> None:
         raise SystemExit(f"{root} is not a git repository; commit pairing needs Git.")
 
 
-def cmd_commit(args: argparse.Namespace) -> None:
-    root = detect_root(args.root)
-    require_git(root)
+def staged_git_paths(root: Path) -> list[str]:
+    output = run_git(root, ["diff", "--cached", "--name-only", "-z"]).stdout
+    return [path for path in output.split("\0") if path]
+
+
+
+def normalized_commit_paths(root: Path, paths: list[str]) -> list[str]:
+    result: list[str] = []
+    for item in paths:
+        candidate = Path(item)
+        candidate = candidate if candidate.is_absolute() else root / candidate
+        # Keep symlink filenames, but require their lexical path to remain in root.
+        absolute = Path(os.path.abspath(candidate))
+        try:
+            relative = absolute.relative_to(root.resolve()).as_posix()
+        except ValueError:
+            raise SystemExit(f"Commit path is outside this repository: {item}")
+        if relative in {"", "."}:
+            raise SystemExit("Use --all explicitly to commit the whole repository.")
+        result.append(relative)
+    return result
+
+
+
+def path_in_commit_scope(path: str, selected: list[str]) -> bool:
+    return any(path == item or path.startswith(item.rstrip("/") + "/") for item in selected)
+
+
+
+def stage_literal_paths(root: Path, paths: list[str]) -> None:
+    if paths:
+        run_git(root, ["add", "--", *[":(literal)" + item for item in paths]])
+
+
+
+def _commit_records(root: Path, args: argparse.Namespace) -> None:
     records = [find_record(root, ref) for ref in args.record]
     record_ids = [record_id_for(path) for path in records]
-
+    explicit_paths = normalized_commit_paths(root, args.path or [])
+    record_paths = [] if args.no_stage_record else [rel(root, path) for path in records]
+    selected = explicit_paths + record_paths
+    # --path promises a bounded commit. Refuse before changing the index if the
+    # caller has staged another task's work. With no --path, a pre-staged index
+    # remains an explicit supported workflow; --all explicitly opts into all work.
+    if explicit_paths and not args.all:
+        outside = [path for path in staged_git_paths(root) if not path_in_commit_scope(path, selected)]
+        if outside:
+            raise SystemExit("Staged files outside --path/--record scope: " + ", ".join(outside))
     if args.all:
         run_git(root, ["add", "-A"])
-    for item in args.path or []:
-        run_git(root, ["add", "--", item])
-    if not args.no_stage_record:
-        run_git(root, ["add", "--", *[rel(root, path) for path in records]], check=False)
-
-    staged = git_output(root, ["diff", "--cached", "--name-only"])
-    if not staged:
-        raise SystemExit(
-            "Nothing is staged. Stage the work first, or pass --all / --path <file>."
-        )
+    stage_literal_paths(root, explicit_paths + record_paths)
+    if not staged_git_paths(root):
+        raise SystemExit("Nothing is staged. Stage the work first, or pass --all / --path <file>.")
 
     message = args.message.rstrip() + "\n\n" + commit_trailer_block(record_ids) + "\n"
     run_git(root, ["commit", "-m", message])
     sha = resolve_commit(root, "HEAD") or "HEAD"
     short = normalize_sha(sha)
-
-    print("# Paired Commit")
-    print("")
+    print("# Paired Commit\n")
     print(f"Commit: `{short}` - {commit_subject(root, sha)}")
-    print(f"Trailer: {COMMIT_TRAILER_KEY}: {', '.join(record_ids)}")
-    print("")
-    print("## Records")
-    print("")
+    print(f"Trailer: {COMMIT_TRAILER_KEY}: {', '.join(record_ids)}\n")
+    print("## Records\n")
+    bookkeeping_paths = [rel(root, path) for path in records]
     for path, record_id in zip(records, record_ids):
         pair_record_commit(root, path, sha)
+        if is_archive_stub(path):
+            archived = archived_to_value(path)
+            if archived and (root / archived).exists():
+                bookkeeping_paths.append(archived)
         print(f"- `{rel(root, path)}` ({record_id}) -> `{short}`")
-    print("")
-    print("## Files")
-    print("")
+    print("\n## Files\n")
     for item in commit_files(root, sha)[:20]:
         print(f"- {item}")
     print("")
 
+    generated = [root / HISTORY_DIR / "INDEX.md", root / HISTORY_DIR / OBSIDIAN_MAP_FILE, archive_index_path(root)]
+    before = {path: path.read_bytes() if path.exists() else None for path in generated}
     build_index(root)
+    bookkeeping_paths.extend(rel(root, path) for path in generated if path.exists() and path.read_bytes() != before[path])
     if args.no_record_commit:
         print("Record files now carry the commit id and are left uncommitted.")
         return
-    run_git(root, ["add", "--", HISTORY_DIR], check=False)
-    if (archive_root(root)).exists():
-        run_git(root, ["add", "--", ARCHIVE_DIR], check=False)
-    if git_output(root, ["diff", "--cached", "--name-only"]):
-        # No History-Record trailer here: the bookkeeping commit records the pairing,
-        # it is not itself the work the record describes.
+    # Never sweep the whole history directory into bookkeeping. Another draft may
+    # have been created before or during this operation.
+    outside = [path for path in staged_git_paths(root) if not path_in_commit_scope(path, bookkeeping_paths)]
+    if outside:
+        raise SystemExit("Work commit succeeded, but bookkeeping stopped because unrelated files became staged: " + ", ".join(outside))
+    stage_literal_paths(root, sorted(set(bookkeeping_paths)))
+    if staged_git_paths(root):
         bookkeeping = f"history: pair {', '.join(record_ids)} with {short}\n"
         run_git(root, ["commit", "-m", bookkeeping])
         print(f"Bookkeeping commit: `{normalize_sha(resolve_commit(root, 'HEAD') or '')}`")
+
+
+
+def cmd_commit(args: argparse.Namespace) -> None:
+    root = detect_root(args.root)
+    require_git(root)
+    with history_lock(root):
+        _commit_records(root, args)
 
 
 def cmd_link_commit(args: argparse.Namespace) -> None:
@@ -4304,7 +4737,7 @@ def cmd_link_commit(args: argparse.Namespace) -> None:
                 for path in records:
                     text = path.read_text(encoding="utf-8")
                     text = text.replace(normalize_sha(head), normalize_sha(new_head))
-                    path.write_text(text, encoding="utf-8")
+                    atomic_write_text(path, text)
                 print("- rewrote the record commit ids to match the amended commit.")
 
     build_index(root)
@@ -4313,6 +4746,22 @@ def cmd_link_commit(args: argparse.Namespace) -> None:
 
 def cmd_commits(args: argparse.Namespace) -> None:
     root = detect_root(args.root)
+    if getattr(args, "file", None):
+        if args.record or args.commit:
+            raise SystemExit("--file cannot be combined with --record or --commit.")
+        from history_git import GitTraceError, file_provenance, print_file_provenance
+
+        try:
+            payload = file_provenance(
+                root, args.file, sys.modules[__name__], ref=args.ref or "HEAD",
+                limit=args.limit, follow=args.follow, diff=args.diff,
+            )
+        except GitTraceError as exc:
+            raise SystemExit(str(exc)) from exc
+        print_file_provenance(payload, as_json=args.json)
+        return
+    if any(getattr(args, key, False) for key in ("ref", "follow", "diff", "json")):
+        raise SystemExit("--ref, --follow, --diff, and --json require --file.")
     print("# Commit Pairing")
     print("")
     if args.record:
@@ -4530,7 +4979,6 @@ def print_archive_policy(args: argparse.Namespace) -> None:
 
 def cmd_archive_plan(args: argparse.Namespace) -> None:
     root = detect_root(args.root)
-    ensure_history(root)
     print("# Archive Plan")
     print("")
     print_archive_policy(args)
@@ -4554,7 +5002,8 @@ def cmd_archive_plan(args: argparse.Namespace) -> None:
 
 def cmd_archive_run(args: argparse.Namespace) -> None:
     root = detect_root(args.root)
-    ensure_history(root)
+    if not args.dry_run:
+        ensure_history(root)
     print("# Archive Run")
     print("")
     print_archive_policy(args)
@@ -4584,8 +5033,8 @@ def cmd_archive_run(args: argparse.Namespace) -> None:
         destination.parent.mkdir(parents=True, exist_ok=True)
         summary = summary_lines_for(source, args.summary_chars)
         stub = archive_stub_text(root, source, destination, summary)
-        destination.write_text(archived_record_text(root, source, source), encoding="utf-8")
-        source.write_text(stub, encoding="utf-8")
+        atomic_write_text(destination, archived_record_text(root, source, source))
+        atomic_write_text(source, stub)
         moved += 1
         print(f"- `{rel(root, source)}` -> `{rel(root, destination)}` (summary stub kept in place)")
     build_index(root)
@@ -4613,7 +5062,7 @@ def cmd_archive_restore(args: argparse.Namespace) -> None:
 
     destination = stub if stub is not None else root / HISTORY_DIR / record_kind(archived) / archived.name
     destination.parent.mkdir(parents=True, exist_ok=True)
-    destination.write_text(restored_record_text(archived.read_text(encoding="utf-8")), encoding="utf-8")
+    atomic_write_text(destination, restored_record_text(archived.read_text(encoding="utf-8")))
     archived.unlink()
     for parent in [archived.parent, archived.parent.parent]:
         try:
@@ -4628,7 +5077,6 @@ def cmd_archive_restore(args: argparse.Namespace) -> None:
 
 def cmd_archive_status(args: argparse.Namespace) -> None:
     root = detect_root(args.root)
-    ensure_history(root)
     archived = iter_archive_files(root)
     stubs = archive_stub_paths(root)
     print("# Archive Status")
@@ -4770,7 +5218,8 @@ def cmd_archive_migrate(args: argparse.Namespace) -> None:
 def cmd_archive_adopt(args: argparse.Namespace) -> None:
     """First-run bulk archive for a history that predates summary stubs."""
     root = detect_root(args.root)
-    ensure_history(root)
+    if not args.dry_run:
+        ensure_history(root)
     kinds = resolve_archive_kinds(args.include)
     stubs_before = len(archive_stub_paths(root))
 
@@ -4849,8 +5298,8 @@ def cmd_archive_adopt(args: argparse.Namespace) -> None:
             destination.parent.mkdir(parents=True, exist_ok=True)
             summary = summary_lines_for(source, args.summary_chars)
             stub = archive_stub_text(root, source, destination, summary)
-            destination.write_text(archived_record_text(root, source, source), encoding="utf-8")
-            source.write_text(stub, encoding="utf-8")
+            atomic_write_text(destination, archived_record_text(root, source, source))
+            atomic_write_text(source, stub)
         build_index(root)
 
     after_files, after_bytes = recall_surface(root)
@@ -4876,9 +5325,17 @@ def add_root(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--root", help="Repository root. Defaults to git root, then current directory.")
 
 
+class CapabilitiesAction(argparse.Action):
+    def __call__(self, parser, namespace, values, option_string=None):
+        print(json.dumps({"version": VERSION, "backend": "vendored-bm25s", "features": ["readonly-recall", "brief", "file-provenance", "record-relations", "scoped-finish"]}))
+        parser.exit()
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Maintain searchable research project history.")
     add_root(parser)
+    parser.add_argument("--version", action="version", version=f"track-research-history {VERSION}")
+    parser.add_argument("--capabilities", action=CapabilitiesAction, nargs=0)
     sub = parser.add_subparsers(dest="command", required=True)
 
     p = sub.add_parser("bootstrap", help="Create history/ structure and templates.")
@@ -4890,8 +5347,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--limit", type=int, default=8)
     p.add_argument("--context-chars", type=int, default=2800)
     p.add_argument("--daily-chars", type=int, default=1800)
-    p.add_argument("--no-variants", action="store_true", help="Hide generated query variants in BM25 recall.")
+    p.add_argument("--no-variants", action="store_true", help="Disable generated query expansions and hide their listing.")
     p.add_argument("--include-archive", action="store_true", help="Also search archived record texts.")
+    p.add_argument("--brief", action="store_true", help="Print compact startup context without writes.")
+    p.add_argument("--json", action="store_true", help="Print structured query results.")
+    p.add_argument("--kind", action="append", help="Restrict search to a record kind (repeatable).")
+    p.add_argument("--status", dest="status_filter", action="append", help="Restrict search to a status (repeatable).")
+    p.add_argument("--scope", help="Restrict search to a repository-relative history path prefix.")
+    p.add_argument("--chunks-per-file", type=int, choices=(1, 2), default=1)
     p.set_defaults(func=cmd_start)
 
     p = sub.add_parser("today", help="Create or print today's daily log path.")
@@ -4914,6 +5377,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--agent", default="codex")
     p.add_argument("--commit", action="append", help="Pair this commit-ish with the record. Repeatable.")
     p.add_argument("--no-git-status", action="store_true")
+    p.add_argument("--scope", help="Applicability of this record, e.g. a version or workstream.")
+    p.add_argument("--corrects", action="append", help="Record id/path this record partially corrects.")
+    p.add_argument("--supersedes", action="append", help="Record id/path this record fully replaces.")
     p.set_defaults(func=cmd_change)
 
     p = sub.add_parser("decision", help="Record a durable decision.")
@@ -4924,6 +5390,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--consequence")
     p.add_argument("--status", default="accepted")
     p.add_argument("--commit", action="append", help="Pair this commit-ish with the record. Repeatable.")
+    p.add_argument("--scope", help="Applicability of this record, e.g. a version or workstream.")
+    p.add_argument("--corrects", action="append", help="Record id/path this record partially corrects.")
+    p.add_argument("--supersedes", action="append", help="Record id/path this record fully replaces.")
     p.set_defaults(func=cmd_decision)
 
     p = sub.add_parser("idea", help="Record a research or implementation idea.")
@@ -4936,6 +5405,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--tag", action="append")
     p.add_argument("--status", default="open")
     p.add_argument("--commit", action="append", help="Pair this commit-ish with the record. Repeatable.")
+    p.add_argument("--scope", help="Applicability of this record, e.g. a version or workstream.")
+    p.add_argument("--corrects", action="append", help="Record id/path this record partially corrects.")
+    p.add_argument("--supersedes", action="append", help="Record id/path this record fully replaces.")
     p.set_defaults(func=cmd_idea)
 
     p = sub.add_parser("experiment", help="Record an experiment, analysis, or figure export.")
@@ -4949,6 +5421,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--tag", action="append")
     p.add_argument("--status", default="recorded")
     p.add_argument("--commit", action="append", help="Pair this commit-ish with the record. Repeatable.")
+    p.add_argument("--scope", help="Applicability of this record, e.g. a version or workstream.")
+    p.add_argument("--corrects", action="append", help="Record id/path this record partially corrects.")
+    p.add_argument("--supersedes", action="append", help="Record id/path this record fully replaces.")
     p.set_defaults(func=cmd_experiment)
 
     p = sub.add_parser("handoff", help="Record collaborator or agent handoff context.")
@@ -4961,6 +5436,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--task", help="Optional collaboration task id for scoped recall.")
     p.add_argument("--workstream", help="Optional collaboration workstream id for scoped recall.")
     p.add_argument("--commit", action="append", help="Pair this commit-ish with the record. Repeatable.")
+    p.add_argument("--scope", help="Applicability of this record, e.g. a version or workstream.")
+    p.add_argument("--corrects", action="append", help="Record id/path this record partially corrects.")
+    p.add_argument("--supersedes", action="append", help="Record id/path this record fully replaces.")
     p.set_defaults(func=cmd_handoff)
 
     p = sub.add_parser(
@@ -4998,7 +5476,7 @@ def build_parser() -> argparse.ArgumentParser:
     cp.add_argument("--limit", type=int, default=8)
     cp.add_argument("--chars", type=int, default=5000)
     cp.add_argument("--full", action="store_true")
-    cp.add_argument("--no-variants", action="store_true", help="Hide generated query variants in added recall.")
+    cp.add_argument("--no-variants", action="store_true", help="Disable generated query expansions.")
     cp.set_defaults(func=cmd_handoff_agent_capsule_resume)
 
     cp = capsule_sub.add_parser("import", help="Import a capsule markdown file from another machine or tool.")
@@ -5011,14 +5489,21 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--task", required=True)
     p.add_argument("--scope")
     p.add_argument("--agent", default="codex")
+    p.add_argument("--corrects", action="append", help="Record id/path this record partially corrects.")
+    p.add_argument("--supersedes", action="append", help="Record id/path this record fully replaces.")
     p.set_defaults(func=cmd_session)
 
     p = sub.add_parser("search", help="Search history markdown files with BM25S ranking.")
     p.add_argument("query")
     p.add_argument("--limit", type=int, default=20)
     p.add_argument("--exact", action="store_true", help="Use exact substring matching instead of BM25S.")
-    p.add_argument("--no-variants", action="store_true", help="Hide generated query variants.")
+    p.add_argument("--no-variants", action="store_true", help="Disable generated query expansions.")
     p.add_argument("--include-archive", action="store_true", help="Also search archived record texts.")
+    p.add_argument("--json", action="store_true", help="Print structured query results.")
+    p.add_argument("--kind", action="append", help="Restrict search to a record kind (repeatable).")
+    p.add_argument("--status", dest="status_filter", action="append", help="Restrict search to a status (repeatable).")
+    p.add_argument("--scope", help="Restrict search to a repository-relative history path prefix.")
+    p.add_argument("--chunks-per-file", type=int, choices=(1, 2), default=1)
     p.set_defaults(func=cmd_search)
 
     p = sub.add_parser("exact", help="Exact substring search over history markdown files.")
@@ -5049,6 +5534,7 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"Warn when a note exceeds this size. Defaults to {OBSIDIAN_LINT_MAX_CHARS}.",
     )
     p.add_argument("--strict", action="store_true", help="Treat lint warnings as failures.")
+    p.add_argument("--base", help="Check committed work since an explicit ancestor commit.")
     p.set_defaults(func=cmd_finish)
 
     p = sub.add_parser("recall", help="Print context, latest daily log, recent records, and optional query hits.")
@@ -5056,8 +5542,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--limit", type=int, default=8)
     p.add_argument("--context-chars", type=int, default=2800)
     p.add_argument("--daily-chars", type=int, default=1800)
-    p.add_argument("--no-variants", action="store_true", help="Hide generated query variants in BM25 recall.")
+    p.add_argument("--no-variants", action="store_true", help="Disable generated query expansions and hide their listing.")
     p.add_argument("--include-archive", action="store_true", help="Also search archived record texts.")
+    p.add_argument("--json", action="store_true", help="Print structured query results.")
+    p.add_argument("--kind", action="append", help="Restrict search to a record kind (repeatable).")
+    p.add_argument("--status", dest="status_filter", action="append", help="Restrict search to a status (repeatable).")
+    p.add_argument("--scope", help="Restrict search to a repository-relative history path prefix.")
+    p.add_argument("--chunks-per-file", type=int, choices=(1, 2), default=1)
+    p.add_argument("--update", action="store_true", help="Explicitly create daily log and refresh indexes (legacy behavior).")
     p.set_defaults(func=cmd_recall)
 
     p = sub.add_parser("commit", help="Create a Git commit paired with one or more history records.")
@@ -5088,6 +5580,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--commit", help="Show which records reference this commit.")
     p.add_argument("--stat", action="store_true", help="Print `git show --stat` for each paired commit.")
     p.add_argument("--limit", type=int, default=12)
+    p.add_argument("--file", help="Trace one file's commits and history evidence in a selected ref.")
+    p.add_argument("--ref", help="File trace commit/ref scope; defaults to HEAD.")
+    p.add_argument("--follow", action="store_true", help="Follow Git's single-file rename heuristic.")
+    p.add_argument("--diff", action="store_true", help="Include bounded patches for the traced file.")
+    p.add_argument("--json", action="store_true", help="Emit structured file provenance.")
     p.set_defaults(func=cmd_commits)
 
     p = sub.add_parser("sync-commits", help=f"Backfill pairing from {COMMIT_TRAILER_KEY} commit trailers.")
@@ -5268,7 +5765,7 @@ def build_parser() -> argparse.ArgumentParser:
     cp.add_argument("--context-chars", type=int, default=2400)
     cp.add_argument("--include-inbox", action="store_true", help="Include unaccepted inbox summaries in retrieval output.")
     cp.add_argument("--include-archive", action="store_true", help="Include archived records for provenance search.")
-    cp.add_argument("--no-variants", action="store_true", help="Hide generated query variants in BM25 recall.")
+    cp.add_argument("--no-variants", action="store_true", help="Disable generated query expansions and hide their listing.")
     cp.set_defaults(func=cmd_collab_recall)
 
     cp = collab_sub.add_parser("status", help="Show task owners, recent decisions, open risks, and stale contexts.")
@@ -5282,7 +5779,19 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
-    args.func(args)
+    mutating = args.command in {"bootstrap", "today", "index", "obsidian-map", "change", "decision", "idea", "experiment", "handoff", "session", "commit", "link-commit", "sync-commits"}
+    mutating |= args.command == "recall" and getattr(args, "update", False)
+    mutating |= args.command == "handoff-agent-capsule" and args.capsule_command in {"create", "import"}
+    mutating |= args.command == "archive" and args.archive_command not in {"plan", "status"} and not getattr(args, "dry_run", False)
+    mutating |= args.command == "collab" and args.collab_command in {"bootstrap", "submit-summary", "promote", "archive"} and not getattr(args, "dry_run", False)
+    try:
+        if mutating:
+            with history_lock(detect_root(args.root)):
+                args.func(args)
+        else:
+            args.func(args)
+    except ValueError as exc:
+        parser.error(str(exc))
     return 0
 
 

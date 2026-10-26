@@ -68,7 +68,7 @@ python3 scripts/history.py --version
 python3 scripts/history.py --capabilities
 ```
 
-The installer copies a consistent skill payload, records hashes and the source revision in `INSTALLATION.json`, and preserves each prior directory or symlink as a sibling backup. It does not change a symlink's old target or overwrite a Git checkout. Copy-based installs require reinstalling after a source update. A failed multi-target installation rolls back completed replacements.
+The installer copies a consistent skill payload, records hashes and the source revision in `INSTALLATION.json`, and preserves each prior directory or symlink as a sibling backup. It does not change a symlink's old target or overwrite a Git checkout. Copy-based installs require reinstalling after a source update. A failed multi-target installation rolls back completed replacements. If an existing real skill directory is a mount point and cannot be renamed (EXDEV/EBUSY), installation uses managed-file backups and per-file atomic replacement with the installation manifest published last. This mode preserves the mount root and unrelated files; it is not a whole-directory atomic switch. Other permission or read-only errors are not bypassed.
 
 ## File history and retrieval
 

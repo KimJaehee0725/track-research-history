@@ -35,6 +35,7 @@ Open this `history/` directory as an Obsidian vault. These links stay repo-relat
 - [[changes/2026-09-23-104430-history-archive-summary-stub-record-commit-pairing|Change - history-archive summary stub과 record-commit pairing 추가]]
 - [[changes/2026-09-23-120615-squash-commit-sync-commits-prune|Change - squash 머지로 끊긴 commit 참조를 sync-commits --prune으로 정리]]
 - [[changes/2026-10-27-001521-git-bm25s-history-1d392c630fd9442b|Change - Git 파일 이력 탐색과 BM25S 근거 검색 및 history 안정성 통합]]
+- [[changes/2026-10-27-002454-change-06173284b1c5444f|Change - 마운트된 스킬 설치 경로의 원자적 파일 갱신과 실패 복구]]
 
 ## daily
 

@@ -13,11 +13,11 @@ Last updated: 2026-10-27
 - `scripts/history_relations.py`: 검색어를 반복하지 않는 직접 정정/대체 기록도 별도 문맥으로 노출한다.
 - 순위 검색은 vendored BM25S+NumPy만 사용한다. SQLite/중앙 서비스/별도 vault는 사용하지 않는다.
 - 기록 쓰기는 작업트리별 잠금·원자적 저장·고유ID를 사용한다. 기본 recall은 쓰지 않으며 `recall --update`만 과거 갱신 동작이다.
-- `scripts/install.py --target ...`은 동일 payload·revision·hash를 Codex/Claude에 설치하고 기존 경로를 백업한다.
+- `scripts/install.py --target ...`은 동일 payload·revision·hash를 Codex/Claude에 설치하고 기존 경로를 백업한다. mount 경로는 managed 파일별 원자적 갱신과 rollback을 사용한다.
 
 ## 검증과 제한
 
-전체105테스트, 고정26질의 비교, 실제 FabGym 검색·Git 탐색, 독립 임시저장소 작업흐름과 mutation audit를 통과했다. 작은 질의 평가를 일반 의미검색 성능으로 확대하지 않는다. 한글 조사·동의어·의미적 한영 대응, Git rename/merge/revert/squash 해석에는 한계가 있으며 근거 범위와 진단을 확인한다. POSIX fcntl과 NumPy가 필요하다.
+전체111테스트, 고정26질의 비교, 실제 FabGym 검색·Git 탐색, 독립 임시저장소 작업흐름과 mutation audit를 통과했다. 작은 질의 평가를 일반 의미검색 성능으로 확대하지 않는다. 한글 조사·동의어·의미적 한영 대응, Git rename/merge/revert/squash 해석에는 한계가 있으며 근거 범위와 진단을 확인한다. POSIX fcntl과 NumPy가 필요하다.
 
 ## 운영 원칙
 
@@ -27,3 +27,5 @@ Last updated: 2026-10-27
 
 - [[changes/2026-10-27-001521-git-bm25s-history-1d392c630fd9442b]]
 - [[decisions/0004-history-summary-stub-commit-pairing]]
+
+- [[changes/2026-10-27-002454-change-06173284b1c5444f]]
